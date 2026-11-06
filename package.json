@@ -1,0 +1,32 @@
+{
+  "name": "galeri-seleksi",
+  "version": "1.0.0",
+  "description": "Aplikasi pilih foto online untuk studio foto: galeri bernomor dari Google Drive, PIN, kuota, timer, foto tambahan, ekspor untuk editor.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node -e \"require('./src/db').migrate().then(()=>process.exit(0)).catch(e=>{console.error(e);process.exit(1)})\"",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/manusiaz/buatbaru23.git"
+  },
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/manusiaz/buatbaru23/issues"
+  },
+  "homepage": "https://github.com/manusiaz/buatbaru23#readme",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "express": "^5.3.0",
+    "nodemailer": "^10.3.1",
+    "pg": "^8.23.1",
+    "sharp": "^0.35.5"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}

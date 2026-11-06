@@ -1,0 +1,15 @@
+# Database ada di VPS kamu: isi DATABASE_URL di .env, lalu: docker compose up -d --build
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    volumes:
+      - galeri-data:/data
+    # Kalau Postgres jalan langsung di host VPS (bukan container), pakai host.docker.internal di DATABASE_URL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+volumes:
+  galeri-data:

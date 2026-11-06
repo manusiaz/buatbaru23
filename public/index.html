@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#001219">
+<meta name="description" content="Galeri pilih foto online untuk studio foto: folder Google Drive jadi galeri bernomor ber-PIN, ada batas waktu, foto tambahan berbayar, dan daftar nama file siap untuk Lightroom.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="/css/base.css">
+<title>Galeri Seleksi · Pelanggan pilih nomor, editor langsung ketemu filenya</title>
+<style>
+.wrap { max-width: 1240px; margin: 0 auto; padding: 0 16px; }
+header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0; }
+header.top nav { display: flex; gap: 22px; align-items: center; }
+header.top nav a { color: var(--ink); text-decoration: none; font-weight: 600; }
+.hero { padding: 40px 0 56px; display: grid; grid-template-columns: 1.15fr 1fr; gap: 40px; align-items: center; }
+.hero p.lead { font-size: 18px; line-height: 28px; color: var(--muted); max-width: 560px; }
+.mosaic { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; transform: rotate(-3deg); }
+.mosaic i { aspect-ratio: 4/5; border-radius: 16px; position: relative; }
+.mosaic i::before { content: attr(data-n); position: absolute; top: 8px; left: 8px; background: var(--abyss); color: #fff; font: 700 13px var(--f-mono); padding: 3px 7px; border-radius: 7px; }
+.mosaic i.sel { outline: 3px solid var(--amber); outline-offset: -3px; }
+.mosaic i.sel::before { background: var(--amber); color: var(--abyss); }
+section.band { padding: 64px 0; }
+.dark { background: var(--abyss); color: #fff; }
+.dark .muted { color: #A9B8BA; }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 28px; }
+.bubble { background: #12292F; border-radius: 18px; padding: 10px 14px; margin: 8px 0; max-width: 360px; }
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-top: 28px; }
+.features .card h3 { margin: 10px 0 6px; font-size: 18px; }
+.steps3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 28px; }
+.steps3 .num { font: 700 15px var(--f-mono); background: var(--abyss); color: #fff; padding: 4px 9px; border-radius: 8px; }
+.price { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: 28px; }
+.price .card { display: flex; flex-direction: column; gap: 8px; }
+.price .card.pop { border: 2px solid var(--amber); }
+.price .v { font: 800 30px var(--f-display); }
+.price ul { padding-left: 18px; margin: 6px 0 12px; color: var(--muted); }
+details.faq { background: var(--s000); border: 1px solid var(--line); border-radius: 18px; padding: 16px 20px; margin-top: 10px; }
+details.faq summary { font-weight: 700; cursor: pointer; }
+footer { padding: 32px 0; color: var(--muted); font-size: 14px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+@media (max-width: 900px) {
+  .hero, .compare { grid-template-columns: 1fr; }
+  .steps3 { grid-template-columns: 1fr; }
+  header.top nav .hide-m { display: none; }
+  .mosaic { transform: none; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a href="/" class="row" style="text-decoration:none;color:inherit;gap:10px"><span class="logo-mark">001</span><b style="font:800 18px var(--f-display);text-transform:uppercase">Galeri Seleksi</b></a>
+    <nav><a class="hide-m" href="#fitur">Fitur</a><a class="hide-m" href="#cara">Cara kerja</a><a class="hide-m" href="#harga">Harga</a><a href="/masuk">Masuk</a><a class="btn btn-primary btn-sm" href="/daftar" style="color:#fff">Coba gratis</a></nav>
+  </header>
+  <section class="hero">
+    <div>
+      <div class="label">Untuk studio wisuda, self-photo, keluarga & prewedding</div>
+      <h1 class="display-xl" style="margin:14px 0 18px">Pelanggan pilih nomor. Editor langsung ketemu filenya.</h1>
+      <p class="lead">Tautkan folder Google Drive hasil sesi. Pelanggan memilih foto sesuai kuota lewat link ber-PIN dengan batas waktu, lalu daftar nama file pilihan langsung sampai ke editor.</p>
+      <div class="row" style="margin-top:22px"><a class="btn btn-primary" href="/daftar">Coba gratis</a><a class="btn btn-secondary" href="#cara">Lihat cara kerja</a></div>
+      <p class="small muted" style="margin-top:12px">Tanpa kartu kredit · Foto asli tetap di Drive kamu</p>
+    </div>
+    <div class="mosaic" aria-hidden="true">
+      <i data-n="003" style="background:#94D2BD"></i><i data-n="009" class="sel" style="background:#E9D8A6"></i><i data-n="015" style="background:#0A9396"></i>
+      <i data-n="021" style="background:#CA6702"></i><i data-n="027" style="background:#D3E2E5"></i><i data-n="033" class="sel" style="background:#BB3E03"></i>
+    </div>
+  </section>
+</div>
+
+<section class="band dark">
+  <div class="wrap">
+    <h2 class="display-lg" style="color:#fff">Berhenti nyocokin screenshot WhatsApp satu per satu</h2>
+    <div class="compare">
+      <div><div class="label" style="color:#A9B8BA">Cara lama</div>
+        <div class="bubble">Kak yang ini ya [screenshot]</div><div class="bubble">Sama yang pas ketawa di taman, yang kedua dari kiri</div><div class="bubble">Eh yang tadi ganti deh 🙏</div>
+        <p class="muted">Admin merekap chat, editor menebak file mana yang dimaksud, dan pilihan telat masuk.</p></div>
+      <div><div class="label" style="color:#A9B8BA">Dengan Galeri Seleksi</div>
+        <div class="row" style="gap:6px;margin:10px 0"><span class="chip-num">003</span><span class="chip-num">007</span><span class="chip-num">012</span><span class="chip-num">018</span><span class="chip-num">021</span></div>
+        <div class="codebox" style="background:#12292F">DSC_4503 DSC_4507 DSC_4512 DSC_4518 DSC_4521</div>
+        <p class="muted">Timer di server, pilihan terkirim otomatis saat waktu habis, dan satu klik salin ke filter Lightroom.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="fitur"><div class="wrap">
+  <div class="label">Fitur</div><h2 class="display-lg">Dibuat untuk satu pekerjaan</h2>
+  <div class="features">
+    <div class="card card-sm"><span class="badge st-siap">Drive</span><h3>Foto tetap di Google Drive</h3><p class="muted">Pilih folder lewat Google atau tempel link. Tidak ada unggah ulang file besar.</p></div>
+    <div class="card card-sm"><span class="badge st-terkirim">001</span><h3>Nomor tetap per foto</h3><p class="muted">File baru dapat nomor berikutnya; nomor lama tidak pernah bergeser.</p></div>
+    <div class="card card-sm"><span class="badge st-memilih">Timer</span><h3>Hitung mundur & tenggat</h3><p class="muted">Jam server jadi acuan. Peringatan 5 dan 1 menit, terkirim otomatis saat habis.</p></div>
+    <div class="card card-sm"><span class="badge st-waktu_habis">Rp</span><h3>Foto tambahan berbayar</h3><p class="muted">Pelanggan bisa memilih melebihi kuota; total biaya tampil berjalan.</p></div>
+    <div class="card card-sm"><span class="badge st-siap">WA</span><h3>Kirim lewat WhatsApp</h3><p class="muted">Template berisi link, PIN, kuota, dan tenggat. Pilihan juga terkirim ke WA studio.</p></div>
+    <div class="card card-sm"><span class="badge st-selesai">CSV</span><h3>Siap untuk editor</h3><p class="muted">Salin nama file (Lightroom, Windows, per baris) atau unduh CSV dengan path subfolder.</p></div>
+  </div>
+</div></section>
+
+<section class="band" id="cara" style="background:var(--s000)"><div class="wrap">
+  <div class="label">Tiga langkah</div><h2 class="display-lg">Cara kerja</h2>
+  <div class="steps3">
+    <div class="card card-sm"><span class="num">001</span><h3>Tautkan folder Drive</h3><p class="muted">Buat sesi, pilih paket, pilih folder. Foto langsung terbaca dan dinomori.</p></div>
+    <div class="card card-sm"><span class="num">002</span><h3>Kirim link + PIN</h3><p class="muted">Satu tombol membuka WhatsApp pelanggan dengan pesan siap kirim.</p></div>
+    <div class="card card-sm"><span class="num">003</span><h3>Salin, tempel, edit</h3><p class="muted">Buka Pilihan Masuk, salin format Lightroom, dan semua file pilihan langsung tersaring.</p></div>
+  </div>
+</div></section>
+
+<section class="band" id="harga"><div class="wrap">
+  <div class="label">Harga</div><h2 class="display-lg">Mulai gratis</h2>
+  <div class="price">
+    <div class="card"><b>Gratis</b><div class="v">Rp 0</div><ul><li>10 sesi/bulan</li><li>1 pengguna</li><li>Label produk di galeri</li></ul><a class="btn btn-secondary" href="/daftar">Mulai gratis</a></div>
+    <div class="card"><b>Starter</b><div class="v">Rp 149.000</div><span class="small muted">/ bulan</span><ul><li>150 sesi/bulan</li><li>3 pengguna</li><li>Branding studio penuh</li></ul><a class="btn btn-secondary" href="/daftar">Pilih Starter</a></div>
+    <div class="card pop"><b>Pro</b><div class="v">Rp 399.000</div><span class="small muted">/ bulan</span><ul><li>600 sesi/bulan</li><li>10 pengguna</li><li>WhatsApp otomatis, laporan, mode kiosk</li></ul><a class="btn btn-amber" href="/daftar">Pilih Pro</a></div>
+    <div class="card"><b>Bisnis</b><div class="v">Negosiasi</div><ul><li>Multi-cabang</li><li>SLA & onboarding</li></ul><a class="btn btn-secondary" href="/daftar">Hubungi kami</a></div>
+  </div>
+</div></section>
+
+<section class="band" style="padding-top:0"><div class="wrap">
+  <h2 class="display-lg">Pertanyaan</h2>
+  <details class="faq"><summary>Apakah foto saya disimpan di server?</summary><p class="muted">Tidak. File asli tetap di Google Drive kamu. Kami hanya membuat pratinjau kecil ber-watermark dan menghapusnya otomatis setelah sesi selesai.</p></details>
+  <details class="faq"><summary>Pelanggan perlu daftar akun?</summary><p class="muted">Tidak. Cukup link dan PIN 4–6 digit. PIN terkunci 15 menit setelah 5 kali salah.</p></details>
+  <details class="faq"><summary>Kalau sinyal pelanggan jelek dan waktunya habis?</summary><p class="muted">Setiap ketukan langsung tersimpan di server, jadi pilihan yang sudah dibuat tidak hilang. Pelanggan bisa menekan "Minta tambah waktu", dan admin menambah 5, 10, atau 15 menit dengan satu ketukan.</p></details>
+  <details class="faq"><summary>Kalau pelanggan mau ganti pilihan setelah dikirim?</summary><p class="muted">Pilihan terkunci setelah dikirim. Admin bisa membukanya ulang dari dasbor; semua tercatat di log aktivitas.</p></details>
+  <details class="faq"><summary>Nama file kembar dari dua kamera?</summary><p class="muted">Ditandai saat sinkron, nama subfolder ikut tampil, dan path lengkap ikut di ekspor CSV.</p></details>
+</div></section>
+
+<div class="wrap"><footer><span>© 2026 Galeri Seleksi</span><span><a href="/privasi">Kebijakan privasi</a> · <a href="/masuk">Masuk</a></span></footer></div>
+</body>
+</html>
