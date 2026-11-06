@@ -36,7 +36,7 @@ function watermarkSvg(w, h, text) {
 
 async function render(input, kind, wmText) {
   const size = SIZES[kind];
-  const base = sharp(input, { failOn: 'none' }).rotate().resize(size, size, { fit: 'inside', withoutEnlargement: true });
+  const base = sharp(input, { failOn: 'none', limitInputPixels: 100e6 }).rotate().resize(size, size, { fit: 'inside', withoutEnlargement: true });
   const { data, info } = await base.toBuffer({ resolveWithObject: true });
   let img = sharp(data);
   if (wmText) img = img.composite([{ input: watermarkSvg(info.width, info.height, wmText), top: 0, left: 0 }]);

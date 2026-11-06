@@ -10,7 +10,7 @@ const sync = require('../sync');
 const images = require('../images');
 const S = require('../sesi');
 const F = require('../../public/shared/format');
-const { randomToken, sha256, encrypt, decrypt, randomPin } = require('../security');
+const { randomToken, sha256, encrypt, decrypt, randomPin, hashPin } = require('../security');
 const { hashPassword, checkPassword, createLogin, destroyLogin, currentUser, requireUser, requireSuperadmin, can } = require('../auth');
 const QRCode = require('qrcode');
 const { HttpError, bad, forbidden, notFound, ah, str, int, bool, setCookie } = require('../http');
@@ -55,12 +55,14 @@ r.get('/config', (req, res) => {
     googleAppId: config.googleAppId || null,
     serviceAccountEmail: drive.serviceAccountEmail(),
     demoSource: config.allowDemoSource,
+    registrasi: config.allowRegistration,
     formats: F.FORMATS,
   });
 });
 
 // ---------- Auth ----------
 r.post('/auth/register', limit('auth', 10, 15 * 60), ah(async (req, res) => {
+  if (!config.allowRegistration) throw forbidden('Pendaftaran studio baru ditutup.');
   const studioNama = str(req.body.studio_nama, { required: true, max: 80, name: 'Nama studio' });
   const nama = str(req.body.nama, { required: true, max: 80, name: 'Nama' });
   const email = str(req.body.email, { required: true, max: 160, name: 'Email' }).toLowerCase();
@@ -93,7 +95,7 @@ async function seedPakets(c, studioId) {
   }
 }
 
-r.post('/auth/login', limit('auth', 20, 15 * 60), ah(async (req, res) => {
+r.post('/auth/login', limit('auth', 20, 15 * 60), limit('login_email', 10, 15 * 60, (req) => String((req.body && req.body.email) || '').toLowerCase().slice(0, 160)), ah(async (req, res) => {
   const email = str(req.body.email, { required: true, max: 160, name: 'Email' }).toLowerCase();
   const u = await db.one('SELECT id, password_hash, aktif FROM users WHERE email=$1', [email]);
   if (!u || !u.aktif || !(await checkPassword(String(req.body.password || ''), u.password_hash))) {
@@ -111,11 +113,16 @@ r.post('/auth/google', limit('auth', 20, 15 * 60), ah(async (req, res) => {
   const info = await resp.json().catch(() => ({}));
   if (!resp.ok || info.aud !== config.googleClientId || info.email_verified !== 'true') throw bad('Login Google gagal.');
   const email = String(info.email).toLowerCase();
-  let u = await db.one('SELECT id, aktif FROM users WHERE google_sub=$1 OR email=$2 ORDER BY (google_sub=$1) DESC LIMIT 1', [info.sub, email]);
+  let u = await db.one('SELECT id, aktif FROM users WHERE google_sub=$1', [info.sub]);
+  if (!u) {
+    const byEmail = await db.one('SELECT id, password_hash FROM users WHERE lower(email)=$1', [email]);
+    // Akun yang dibuat dengan kata sandi tidak otomatis ditautkan: email saat daftar tidak diverifikasi,
+    // jadi akun itu bisa saja dibuat orang lain lebih dulu.
+    if (byEmail) throw bad('Email ini sudah terdaftar dengan kata sandi. Masuk dengan email & kata sandi.');
+  }
   if (u && !u.aktif) throw forbidden('Akun dinonaktifkan.');
-  if (u) {
-    await db.q('UPDATE users SET google_sub=$2 WHERE id=$1 AND google_sub IS NULL', [u.id, info.sub]);
-  } else {
+  if (!u) {
+    if (!config.allowRegistration) throw forbidden('Pendaftaran studio baru ditutup.');
     const studioNama = str(req.body.studio_nama, { max: 80 }) || `Studio ${info.name || email.split('@')[0]}`;
     u = await db.tx(async (c) => {
       const st = (await c.query('INSERT INTO studios(nama, slug) VALUES ($1,$2) RETURNING id', [studioNama, await uniqueSlug(studioNama)])).rows[0];
@@ -160,8 +167,11 @@ r.use(requireUser());
 
 r.get('/me', ah(async (req, res) => {
   const st = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
-  const unread = await db.one('SELECT count(*)::int AS n FROM notifikasis WHERE studio_id=$1 AND NOT dibaca', [req.user.studio_id]);
-  const masuk = await db.one(`SELECT count(*)::int AS n FROM sesis WHERE studio_id=$1 AND status='terkirim' AND editor_status='antre'`, [req.user.studio_id]);
+  const cab = req.user.cabang_id || null;
+  const unread = await db.one(`SELECT count(*)::int AS n FROM notifikasis n LEFT JOIN sesis s ON s.id=n.sesi_id
+    WHERE n.studio_id=$1 AND NOT n.dibaca AND ($2::bigint IS NULL OR s.cabang_id=$2)`, [req.user.studio_id, cab]);
+  const masuk = await db.one(`SELECT count(*)::int AS n FROM sesis WHERE studio_id=$1 AND status='terkirim' AND editor_status='antre'
+    AND ($2::bigint IS NULL OR cabang_id=$2)`, [req.user.studio_id, cab]);
   res.json({
     user: { id: req.user.id, nama: req.user.nama, email: req.user.email, peran: req.user.peran, google_terhubung: req.user.google_terhubung },
     studio: studioOut(st),
@@ -253,7 +263,7 @@ r.post('/studio/logo', requireUser('studio.edit'), ah(async (req, res) => {
 }));
 
 // ---------- Tim ----------
-r.get('/tim', requireUser('sesi.lihat'), ah(async (req, res) => {
+r.get('/tim', requireUser('sesi.kelola'), ah(async (req, res) => {
   const users = await db.many('SELECT id, nama, email, peran, aktif, cabang_id, dibuat_pada FROM users WHERE studio_id=$1 ORDER BY id', [req.user.studio_id]);
   const invites = can(req.user, 'tim.kelola')
     ? await db.many('SELECT id, email, peran, kedaluwarsa FROM invites WHERE studio_id=$1 AND dipakai_pada IS NULL AND kedaluwarsa>now() ORDER BY id DESC', [req.user.studio_id])
@@ -331,6 +341,21 @@ r.delete('/pakets/:id', requireUser('paket.kelola'), ah(async (req, res) => {
 }));
 
 // ---------- Drive ----------
+// Folder Drive milik studio pertama yang menautkannya. Service account dipakai bersama semua studio,
+// jadi tanpa ikatan ini studio lain bisa membaca folder orang lain cukup dengan ID-nya.
+async function claimFolder(c, studioId, src) {
+  if (src.sumber !== 'service_account') return;
+  const q = c ? (t, p) => c.query(t, p).then((r) => r.rows[0]) : db.one;
+  await q('INSERT INTO drive_folders(folder_id, studio_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [src.folderId, studioId]);
+  const owner = await q('SELECT studio_id FROM drive_folders WHERE folder_id=$1', [src.folderId]);
+  if (owner && Number(owner.studio_id) !== Number(studioId)) throw forbidden('Folder ini sudah ditautkan oleh studio lain.');
+}
+async function checkFolderOwner(studioId, src) {
+  if (src.sumber !== 'service_account') return;
+  const owner = await db.one('SELECT studio_id FROM drive_folders WHERE folder_id=$1', [src.folderId]);
+  if (owner && Number(owner.studio_id) !== Number(studioId)) throw forbidden('Folder ini sudah ditautkan oleh studio lain.');
+}
+
 function sourceFromBody(b) {
   const sumber = b.sumber;
   if (sumber === 'contoh') {
@@ -350,6 +375,7 @@ r.post('/drive/cek', requireUser('sesi.kelola'), limit('drive', 60, 60), ah(asyn
     const n = parseInt(ctx.folderId.split(':')[1], 10);
     return res.json({ ok: true, nama: 'Folder contoh', jumlah: n + (n >= 4 ? 1 : 0), contoh: true });
   }
+  await checkFolderOwner(req.user.studio_id, ctx);
   const out = await drive.checkAccess(ctx);
   if (!out.ok) return res.json(out);
   // Hitung isi folder untuk pratinjau penomoran
@@ -367,9 +393,13 @@ r.post('/drive/cek', requireUser('sesi.kelola'), limit('drive', 60, 60), ah(asyn
 r.post('/drive/bagikan', requireUser('sesi.kelola'), ah(async (req, res) => {
   const token = str(req.body.access_token, { required: true, max: 4096, name: 'Token' });
   const folderId = str(req.body.folder_id, { required: true, max: 200, name: 'Folder' });
+  if (!/^[A-Za-z0-9_-]{5,}$/.test(folderId)) throw bad('ID folder tidak valid.');
+  await checkFolderOwner(req.user.studio_id, { sumber: 'service_account', folderId });
   try {
     await drive.shareFolderWithServiceAccount(token, folderId);
+    await claimFolder(null, req.user.studio_id, { sumber: 'service_account', folderId });
   } catch (e) {
+    if (e.status === 403 && /studio lain/.test(e.message)) throw e;
     throw bad(`Gagal membagikan folder otomatis: ${e.message}. Bagikan manual ke ${drive.serviceAccountEmail()} sebagai Viewer.`);
   }
   res.json({ ok: true });
@@ -477,6 +507,7 @@ async function createSesiIn(c, user, studio, b) {
   let cabangId = b.cabang_id ? parseInt(b.cabang_id, 10) : (user.cabang_id || null);
   if (user.cabang_id && cabangId !== user.cabang_id) throw forbidden('Kamu hanya bisa membuat sesi untuk cabangmu.');
   if (cabangId && !(await c.query('SELECT 1 FROM cabangs WHERE id=$1 AND studio_id=$2', [cabangId, studio.id])).rowCount) throw bad('Cabang tidak ditemukan.');
+  await claimFolder(c, studio.id, src);
   await plans.consumeSession(c, studio, 1);
   const token = randomToken(16); // 128 bit
   const judul = str(b.judul, { max: 120 }) || pelangganNama;
@@ -491,7 +522,7 @@ async function createSesiIn(c, user, studio, b) {
     v.kuota, v.durasi_pilih_menit, v.masa_aktif_jam, v.harga_foto_tambahan, v.maks_foto_tambahan,
     b.tampil_nama_file === undefined ? true : bool(b.tampil_nama_file), b.izin_catatan === undefined ? true : bool(b.izin_catatan),
     src.sumber, src.folderId, src.resourceKey, b.urutan === 'waktu' ? 'waktu' : 'nama',
-    sha256(token), encrypt(token), sha256(`pin:${pin}`), encrypt(pin), String(v.masa_aktif_jam), user.id, cabangId,
+    sha256(token), encrypt(token), hashPin(pin), encrypt(pin), String(v.masa_aktif_jam), user.id, cabangId,
     JSON.stringify(v.harga_bertingkat)])).rows[0];
   await c.query('INSERT INTO tagihans(sesi_id) VALUES ($1)', [row.id]);
   await S.logEvent(c, row.id, 'dibuat', user.nama, { sumber: src.sumber });
@@ -596,8 +627,9 @@ r.post('/sesis/:id/pin', requireUser('sesi.kelola'), ah(async (req, res) => {
   const s = await loadSesi(req, req.params.id);
   const pin = req.body.pin ? String(req.body.pin) : randomPin(6);
   if (!/^\d{4,6}$/.test(pin)) throw bad('PIN harus 4–6 digit angka.');
-  await db.q('UPDATE sesis SET pin_hash=$2, pin_enc=$3 WHERE id=$1', [s.id, sha256(`pin:${pin}`), encrypt(pin)]);
+  await db.q('UPDATE sesis SET pin_hash=$2, pin_enc=$3 WHERE id=$1', [s.id, hashPin(pin), encrypt(pin)]);
   await db.q('DELETE FROM pin_attempts WHERE sesi_id=$1', [s.id]);
+  await db.q('DELETE FROM pin_galeri WHERE sesi_id=$1', [s.id]);
   await db.q('DELETE FROM client_sessions WHERE sesi_id=$1', [s.id]);
   await S.logEvent(null, s.id, 'ganti_pin', req.user.nama, null);
   res.json({ ok: true, pin });
@@ -720,6 +752,7 @@ r.get('/sesis/:id/ekspor.:ext', requireUser('sesi.lihat'), ah(async (req, res) =
 r.get('/dasbor', requireUser('sesi.lihat'), ah(async (req, res) => {
   await S.sweep().catch(() => {});
   const id = req.user.studio_id;
+  const cab = req.user.cabang_id || null;
   const c = await db.one(`SELECT count(*)::int AS total,
       count(*) FILTER (WHERE status IN ('siap','dibuka','memilih'))::int AS aktif,
       count(*) FILTER (WHERE status IN ('siap','dibuka') AND tenggat_link < now() + interval '48 hours')::int AS segera,
@@ -727,7 +760,7 @@ r.get('/dasbor', requireUser('sesi.lihat'), ah(async (req, res) => {
       count(*) FILTER (WHERE status='terkirim')::int AS masuk,
       count(*) FILTER (WHERE status='terkirim' AND editor_status='antre')::int AS masuk_baru,
       count(*) FILTER (WHERE minta_waktu_pada IS NOT NULL AND status='memilih')::int AS minta_waktu
-    FROM sesis WHERE studio_id=$1`, [id]);
+    FROM sesis WHERE studio_id=$1 AND ($2::bigint IS NULL OR cabang_id=$2)`, [id, cab]);
   // Metrik PRD (30 hari terakhir)
   const m = await db.one(`SELECT
       percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM dikirim_pada - COALESCE(link_dikirim_pada, dibuat_pada))) AS median_detik,
@@ -735,18 +768,21 @@ r.get('/dasbor', requireUser('sesi.lihat'), ah(async (req, res) => {
       count(*) FILTER (WHERE dikirim_pada IS NOT NULL AND NOT dikirim_otomatis)::int AS tepat_waktu,
       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM events e WHERE e.sesi_id=s.id AND e.jenis='minta_waktu'))::int AS minta_waktu,
       count(*)::int AS semua
-    FROM sesis s WHERE studio_id=$1 AND dibuat_pada > now() - interval '30 days'`, [id]);
+    FROM sesis s WHERE studio_id=$1 AND ($2::bigint IS NULL OR cabang_id=$2) AND dibuat_pada > now() - interval '30 days'`, [id, cab]);
   const t = await db.one(`SELECT count(*) FILTER (WHERE t.jumlah_foto > 0)::int AS dengan_tambahan,
       COALESCE(sum(t.total_rupiah) FILTER (WHERE t.status_bayar='lunas'),0)::bigint AS lunas,
       COALESCE(sum(t.total_rupiah) FILTER (WHERE t.status_bayar='belum_bayar' AND s.status IN ('terkirim','selesai')),0)::bigint AS belum
-    FROM tagihans t JOIN sesis s ON s.id=t.sesi_id WHERE s.studio_id=$1 AND s.dibuat_pada > now() - interval '30 days'`, [id]);
-  const aktivitas = await db.many(`SELECT n.id, n.jenis, n.pesan, n.dibuat_pada, n.sesi_id, n.dibaca FROM notifikasis n WHERE n.studio_id=$1
-    ORDER BY n.dibuat_pada DESC LIMIT 8`, [id]);
+    FROM tagihans t JOIN sesis s ON s.id=t.sesi_id WHERE s.studio_id=$1 AND ($2::bigint IS NULL OR s.cabang_id=$2) AND s.dibuat_pada > now() - interval '30 days'`, [id, cab]);
+  const aktivitas = await db.many(`SELECT n.id, n.jenis, n.pesan, n.dibuat_pada, n.sesi_id, n.dibaca FROM notifikasis n LEFT JOIN sesis s ON s.id=n.sesi_id
+    WHERE n.studio_id=$1 AND ($2::bigint IS NULL OR s.cabang_id=$2) ORDER BY n.dibuat_pada DESC LIMIT 8`, [id, cab]);
   res.json({ ...c, metrik: { ...m, ...t }, aktivitas });
 }));
 
 r.get('/notifikasi', ah(async (req, res) => {
-  res.json(await db.many('SELECT id, sesi_id, jenis, pesan, dibaca, dibuat_pada FROM notifikasis WHERE studio_id=$1 ORDER BY dibuat_pada DESC LIMIT 50', [req.user.studio_id]));
+  const cab = req.user.cabang_id || null;
+  res.json(await db.many(`SELECT n.id, n.sesi_id, n.jenis, n.pesan, n.dibaca, n.dibuat_pada FROM notifikasis n LEFT JOIN sesis s ON s.id=n.sesi_id
+    WHERE n.studio_id=$1 AND ($2::bigint IS NULL OR s.cabang_id=$2)
+      AND (n.jenis NOT IN ('saldo','saldo_kurang') OR $3) ORDER BY n.dibuat_pada DESC LIMIT 50`, [req.user.studio_id, cab, can(req.user, 'studio.edit')]));
 }));
 r.post('/notifikasi/baca', ah(async (req, res) => {
   await db.q('UPDATE notifikasis SET dibaca=true WHERE studio_id=$1 AND NOT dibaca', [req.user.studio_id]);
@@ -1004,7 +1040,8 @@ r.get('/laporan', requireUser('sesi.kelola'), ah(async (req, res) => res.json(aw
 r.get('/laporan.csv', requireUser('sesi.kelola'), ah(async (req, res) => {
   const d = await laporanData(req);
   const cols = ['cabang', 'sesi', 'terkirim', 'tepat_waktu', 'kedaluwarsa', 'minta_waktu', 'median_detik', 'dengan_tambahan', 'foto_tambahan', 'pendapatan_lunas', 'pendapatan_belum'];
-  const lines = [cols.join(',')].concat(d.per_cabang.concat([{ ...d.total, cabang: 'TOTAL' }]).map((x) => cols.map((c) => `"${String(x[c] ?? '').replace(/"/g, '""')}"`).join(',')));
+  const cell = (v) => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`; return `"${t.replace(/"/g, '""')}"`; };
+  const lines = [cols.join(',')].concat(d.per_cabang.concat([{ ...d.total, cabang: 'TOTAL' }]).map((x) => cols.map((c) => cell(x[c])).join(',')));
   res.set('Content-Type', 'text/csv; charset=utf-8');
   res.set('Content-Disposition', 'attachment; filename="laporan.csv"');
   res.send('﻿' + lines.join('\r\n') + '\r\n');
@@ -1085,7 +1122,7 @@ async function audit(req, aksi, studioId, detail) {
 }
 r.get('/admin/studios', requireSuperadmin(), ah(async (req, res) => {
   const q = req.query.q ? `%${String(req.query.q).slice(0, 80)}%` : null;
-  res.json(await db.many(`SELECT st.id, st.nama, st.slug, st.plan, st.plan_sampai, st.saldo, st.aktif, st.dibuat_pada, st.no_wa,
+  res.json(await db.many(`SELECT st.id, st.nama, st.slug, st.plan, st.plan_sampai, st.saldo, st.aktif, st.wa_platform, st.dibuat_pada, st.no_wa,
       (SELECT email FROM users WHERE studio_id=st.id AND peran='owner' ORDER BY id LIMIT 1) AS owner_email,
       (SELECT count(*)::int FROM users WHERE studio_id=st.id AND aktif) AS pengguna,
       (SELECT count(*)::int FROM sesis WHERE studio_id=st.id) AS sesi_total,
@@ -1098,9 +1135,10 @@ r.put('/admin/studios/:id', requireSuperadmin(), ah(async (req, res) => {
   const plan = plans.PLANS[req.body.plan] ? req.body.plan : st.plan;
   const sampai = req.body.plan_sampai === '' ? null : (/^\d{4}-\d{2}-\d{2}$/.test(req.body.plan_sampai || '') ? req.body.plan_sampai + 'T23:59:59+07:00' : st.plan_sampai);
   const aktif = req.body.aktif === undefined ? st.aktif : bool(req.body.aktif);
-  await db.q('UPDATE studios SET plan=$2, plan_sampai=$3, aktif=$4 WHERE id=$1', [st.id, plan, sampai, aktif]);
+  const waPlatform = req.body.wa_platform === undefined ? st.wa_platform : bool(req.body.wa_platform);
+  await db.q('UPDATE studios SET plan=$2, plan_sampai=$3, aktif=$4, wa_platform=$5 WHERE id=$1', [st.id, plan, sampai, aktif, waPlatform]);
   if (!aktif) await db.q('DELETE FROM user_sessions WHERE user_id IN (SELECT id FROM users WHERE studio_id=$1)', [st.id]);
-  await audit(req, 'ubah_studio', st.id, { plan, plan_sampai: sampai, aktif });
+  await audit(req, 'ubah_studio', st.id, { plan, plan_sampai: sampai, aktif, wa_platform: waPlatform });
   res.json({ ok: true });
 }));
 r.post('/admin/studios/:id/koreksi', requireSuperadmin(), ah(async (req, res) => {

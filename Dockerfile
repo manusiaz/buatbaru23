@@ -11,6 +11,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
 COPY public ./public
 COPY migrations ./migrations
+COPY scripts ./scripts
 RUN mkdir -p /data && chown -R node:node /data
 USER node
 VOLUME ["/data"]

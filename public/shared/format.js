@@ -62,7 +62,11 @@
   }
 
   function csv(items, total) {
-    var esc = function (v) { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    var esc = function (v) {
+      v = v == null ? '' : String(v);
+      if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; // cegah formula Excel/Sheets
+      return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+    };
     var rows = [['nomor', 'nama_file', 'path_subfolder', 'path_lengkap', 'nama_kembar', 'tambahan', 'catatan']];
     items.forEach(function (i) {
       var full = (i.path_subfolder ? i.path_subfolder + '/' : '') + i.nama_file;

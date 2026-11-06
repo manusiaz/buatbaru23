@@ -1,7 +1,6 @@
 'use strict';
 const bcrypt = require('bcryptjs');
 const db = require('./db');
-const config = require('./config');
 const { randomToken, sha256 } = require('./security');
 const { HttpError, forbidden, parseCookies, setCookie } = require('./http');
 
@@ -29,11 +28,10 @@ async function currentUser(req) {
   req._userLoaded = true;
   const t = parseCookies(req)[COOKIE];
   if (!t) return null;
-  const u = await db.one(`SELECT u.id, u.studio_id, u.nama, u.email, u.peran, u.cabang_id, (u.google_sub IS NOT NULL) AS google_terhubung,
+  const u = await db.one(`SELECT u.id, u.studio_id, u.nama, u.email, u.peran, u.cabang_id, u.superadmin, (u.google_sub IS NOT NULL) AS google_terhubung,
       s.token_hash AS sid, st.aktif AS studio_aktif
     FROM user_sessions s JOIN users u ON u.id=s.user_id JOIN studios st ON st.id=u.studio_id
     WHERE s.token_hash=$1 AND s.kedaluwarsa > now() AND u.aktif`, [sha256(t)]);
-  if (u) u.superadmin = config.superadminEmails.includes(String(u.email).toLowerCase());
   // Studio yang dinonaktifkan super admin tidak bisa dipakai (kecuali oleh super admin)
   req.user = u && (u.studio_aktif || u.superadmin) ? u : null;
   return req.user;

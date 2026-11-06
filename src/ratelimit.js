@@ -15,9 +15,9 @@ setInterval(() => {
   for (const [k, b] of buckets) if (b.reset < now) buckets.delete(k);
 }, 60000).unref();
 
-function limit(name, max, windowSec) {
+function limit(name, max, windowSec, keyFn) {
   return (req, res, next) => {
-    if (!hit(`${name}:${req.ip}`, max, windowSec)) return next(new HttpError(429, 'Terlalu banyak percobaan. Coba lagi beberapa menit lagi.'));
+    if (!hit(`${name}:${keyFn ? keyFn(req) : req.ip}`, max, windowSec)) return next(new HttpError(429, 'Terlalu banyak percobaan. Coba lagi beberapa menit lagi.'));
     next();
   };
 }

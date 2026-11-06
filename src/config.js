@@ -22,13 +22,15 @@ const config = {
   smtpUrl: env.SMTP_URL || '',
   mailFrom: env.MAIL_FROM || '',
   // Lain-lain
-  trustProxy: env.TRUST_PROXY || 'loopback',
+  // Jumlah hop proxy tepercaya (mis. 1 untuk satu Nginx/Caddy) atau daftar IP/subnet proxy.
+  // JANGAN "true": klien bisa memalsukan X-Forwarded-For dan melewati kunci PIN & rate limit.
+  trustProxy: parseTrustProxy(env.TRUST_PROXY),
+  allowRegistration: env.ALLOW_REGISTRATION !== 'false',
   previewUrlTtlSec: Math.min(int(env.PREVIEW_URL_TTL_SEC, 3600), 3600),
   allowDemoSource: env.ALLOW_DEMO_SOURCE !== 'false',
   isProd: env.NODE_ENV === 'production',
   // Langganan (F-46). false = semua fitur terbuka tanpa batas (cocok untuk satu studio sendiri)
   billingEnabled: /^(1|true)$/i.test(env.BILLING_ENABLED || ''),
-  superadminEmails: String(env.SUPERADMIN_EMAILS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
   // Nominal top up saldo yang boleh dipilih (Rupiah)
   topupNominal: String(env.TOPUP_NOMINAL || '50000,100000,250000,500000,1000000').split(',').map((x) => parseInt(x, 10)).filter((x) => x > 0 && x <= 100000000),
   // Payment gateway Midtrans (F-35)
@@ -45,10 +47,23 @@ const config = {
 };
 
 if (!config.appSecret) {
-  if (config.isProd) {
-    throw new Error('APP_SECRET wajib diisi di production (minimal 32 karakter acak).');
+  if (!['development', 'test'].includes(env.NODE_ENV)) {
+    throw new Error('APP_SECRET wajib diisi (minimal 32 karakter acak). Untuk lokal, set NODE_ENV=development.');
   }
   config.appSecret = 'dev-secret-jangan-dipakai-di-production-0123456789';
+} else if (config.appSecret.length < 32) {
+  throw new Error('APP_SECRET terlalu pendek (minimal 32 karakter). Buat dengan: openssl rand -base64 48');
+}
+
+function parseTrustProxy(v) {
+  if (v === undefined || v === '') return 'loopback';
+  if (/^\d+$/.test(v)) return parseInt(v, 10);
+  if (v === 'true') {
+    console.warn('[config] TRUST_PROXY=true tidak aman; dipakai sebagai 1 hop proxy.');
+    return 1;
+  }
+  if (v === 'false') return false;
+  return v; // daftar IP/subnet, mis. "loopback, 172.16.0.0/12"
 }
 
 module.exports = config;

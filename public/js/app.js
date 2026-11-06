@@ -64,7 +64,8 @@
     var items = [['dasbor', 'Dasbor', 'dasbor'], ['galeri', 'Galeri', 'galeri'], ['pilihan', 'Pilihan masuk', 'pilih', ME.pilihan_baru],
       ['notifikasi', 'Notifikasi', 'lonceng', ME.notif_belum_dibaca]];
     if (can('sesi.kelola')) items.push(['kiosk', 'Mode kiosk', 'kiosk'], ['laporan', 'Laporan', 'laporan']);
-    items.push(['paket', 'Paket & harga', 'paket'], ['tim', 'Tim & peran', 'tim']);
+    items.push(['paket', 'Paket & harga', 'paket']);
+    if (can('sesi.kelola')) items.push(['tim', 'Tim & peran', 'tim']);
     if (can('studio.edit')) items.push(['pengaturan', 'Pengaturan', 'pengaturan']);
     if (ME.langganan.billing) items.push(['langganan', 'Langganan', 'kartu']);
     if (ME.superadmin) items.push(['admin', 'Super admin', 'kunci']);
@@ -698,8 +699,14 @@
       actions: [{ label: 'Tutup' }, { label: 'Unduh SVG', cls: 'btn-secondary', onClick: function () { location.href = '/api/sesis/' + s.id + '/qr.svg?unduh=1'; } },
         { label: 'Cetak', cls: 'btn-primary', onClick: function () {
           var w = window.open('', '_blank'); if (!w) return;
-          w.document.write('<title>QR ' + s.judul.replace(/</g, '') + '</title><body style="font-family:sans-serif;text-align:center;padding:40px"><h1>' + s.judul.replace(/</g, '&lt;') + '</h1><img src="/api/sesis/' + s.id + '/qr.svg" style="width:320px"><p>PIN: <b>' + (s.pin || '') + '</b></p><script>setTimeout(function(){print()},400)<\/script></body>');
-          w.document.close();
+          // Dibangun dengan DOM (bukan document.write) agar judul tidak bisa menyisipkan HTML, dan tanpa inline script (CSP)
+          var d = w.document;
+          d.title = 'QR ' + s.judul;
+          d.body.style.cssText = 'font-family:sans-serif;text-align:center;padding:40px';
+          var h1 = d.createElement('h1'); h1.textContent = s.judul; d.body.appendChild(h1);
+          var im = d.createElement('img'); im.src = location.origin + '/api/sesis/' + s.id + '/qr.svg'; im.style.width = '320px'; d.body.appendChild(im);
+          var pp = d.createElement('p'); pp.textContent = 'PIN: ' + (s.pin || ''); d.body.appendChild(pp);
+          im.onload = function () { w.focus(); w.print(); };
         } }] });
   }
   function openKiosk(id) {
@@ -1156,11 +1163,13 @@
       var koreksi = h('input.input', { type: 'number', value: '', placeholder: 'mis. 50000 atau -50000' });
       var ket = h('input.input', { placeholder: 'Alasan koreksi (wajib bila diisi)' });
       var aktif = h('input', { type: 'checkbox', checked: st.aktif });
+      var waPlat = h('input', { type: 'checkbox', checked: st.wa_platform });
       UI.modal({ title: st.nama, body: h('div.stack', { style: { gap: '12px' } }, h('label.field', h('span', 'Paket'), plan), h('label.field', h('span', 'Berlaku sampai'), sampai, h('span.hint', 'Kosongkan untuk tanpa batas waktu')),
         h('div.toggle-row', h('b', 'Studio aktif'), h('label.switch', aktif, h('span'))),
+        h('div.toggle-row', h('div', h('b', 'Boleh pakai nomor WhatsApp platform'), h('span.small.muted', 'Hanya untuk studio tepercaya; cegah spam.')), h('label.switch', waPlat, h('span'))),
         h('label.field', h('span', 'Koreksi saldo (Rp, saldo sekarang ' + F.rupiah(Number(st.saldo)) + ')'), koreksi, ket)),
       actions: [{ label: 'Batal' }, { label: 'Simpan', cls: 'btn-primary', onClick: function (c) {
-        api('PUT', '/api/admin/studios/' + st.id, { plan: plan.value, plan_sampai: sampai.value, aktif: aktif.checked }).then(function () {
+        api('PUT', '/api/admin/studios/' + st.id, { plan: plan.value, plan_sampai: sampai.value, aktif: aktif.checked, wa_platform: waPlat.checked }).then(function () {
           if (!koreksi.value) return null;
           return api('POST', '/api/admin/studios/' + st.id + '/koreksi', { jumlah: koreksi.value, keterangan: ket.value });
         }).then(function () { c(); UI.toast('Disimpan'); load(); }).catch(err);

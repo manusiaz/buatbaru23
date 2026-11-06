@@ -300,7 +300,7 @@ test('saldo: top up QRIS manual, persetujuan super admin sekali saja, bayar pake
   config.billingEnabled = true;
   const admin = await owner();
   const meA = (await admin.call('GET', '/api/me')).body;
-  config.superadminEmails.push(meA.user.email.toLowerCase());
+  await db.q('UPDATE users SET superadmin=true WHERE id=$1', [meA.user.id]);
   try {
     const png = 'data:image/png;base64,' + (await require('sharp')({ create: { width: 40, height: 40, channels: 3, background: '#fff' } }).png().toBuffer()).toString('base64');
     const c = await owner();
@@ -337,7 +337,7 @@ test('saldo: top up QRIS manual, persetujuan super admin sekali saja, bayar pake
     await assert.rejects(db.q('UPDATE studios SET saldo=-1 WHERE id=$1', [me.studio.id]));
     const m = (await c.call('GET', '/api/langganan')).body.mutasi.map((x) => x.jenis);
     assert.deepEqual(m, ['bayar_paket', 'topup']);
-  } finally { config.billingEnabled = false; config.superadminEmails.length = 0; }
+  } finally { config.billingEnabled = false; }
 });
 
 test('F-05 multi-cabang: user cabang hanya melihat sesi cabangnya; laporan per cabang', async () => {
@@ -426,7 +426,7 @@ test('F-35 webhook Midtrans: signature diverifikasi, tagihan foto tambahan jadi 
 test('super admin: tangguhkan studio memblokir login studio itu', async () => {
   const admin = await owner();
   const meA = (await admin.call('GET', '/api/me')).body;
-  config.superadminEmails.push(meA.user.email.toLowerCase());
+  await db.q('UPDATE users SET superadmin=true WHERE id=$1', [meA.user.id]);
   try {
     const other = await owner();
     const meO = (await other.call('GET', '/api/me')).body;
@@ -436,5 +436,139 @@ test('super admin: tangguhkan studio memblokir login studio itu', async () => {
     assert.equal((await admin.call('PUT', `/api/admin/studios/${meO.studio.id}`, { aktif: false })).status, 200);
     assert.equal((await other.call('GET', '/api/me')).status, 401);
     assert.ok((await admin.call('GET', '/api/admin/audit')).body.some((a) => a.aksi === 'ubah_studio'));
-  } finally { config.superadminEmails.length = 0; }
+  } finally { /* flag tetap di user uji */ }
+});
+
+
+// ======================= Regresi audit keamanan =======================
+test('audit #1: super admin tidak bisa didapat dengan mendaftar email; hanya flag database', async () => {
+  const c = await owner();
+  assert.equal((await c.call('GET', '/api/admin/ringkasan')).status, 403);
+  const me = (await c.call('GET', '/api/me')).body;
+  assert.equal(me.superadmin, false);
+  await db.q('UPDATE users SET superadmin=true WHERE id=$1', [me.user.id]);
+  assert.equal((await c.call('GET', '/api/admin/ringkasan')).status, 200);
+});
+
+test('audit #2/#3: X-Forwarded-For palsu tidak melewati kunci PIN; batas per galeri lintas IP', async () => {
+  const c = await owner();
+  const s = await sesi(c);
+  // Proxy tepercaya MENAMBAHKAN IP asli di kanan; nilai kiri berasal dari penyerang dan harus diabaikan
+  const tryPin = (spoof, real, pin) => fetch(`${base}/g/${s.token}/api/pin`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': `${spoof}, ${real}` }, body: JSON.stringify({ pin }) });
+  const codes = [];
+  for (let i = 0; i < 6; i++) codes.push((await tryPin(`10.0.0.${i}`, '9.9.9.9', '0000')).status);
+  assert.deepEqual(codes, [400, 400, 400, 400, 429, 429]);
+  assert.equal((await tryPin('10.9.9.9', '9.9.9.9', s.pin)).status, 429, 'IP asli tetap terkunci walau XFF dipalsukan');
+  // Banyak IP asli berbeda: galeri dikunci setelah 30 gagal per jam
+  const s2 = await sesi(c);
+  let last;
+  for (let i = 0; i < 31; i++) {
+    last = await fetch(`${base}/g/${s2.token}/api/pin`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': `8.8.${i}.1` }, body: JSON.stringify({ pin: '0000' }) });
+  }
+  assert.equal(last.status, 429);
+  const ok = await fetch(`${base}/g/${s2.token}/api/pin`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '7.7.7.7' }, body: JSON.stringify({ pin: s2.pin }) });
+  assert.equal(ok.status, 429, 'galeri terkunci untuk semua IP');
+  assert.ok((await c.call('GET', '/api/notifikasi')).body.some((n) => n.jenis === 'pin_terkunci'));
+  // Studio ganti PIN membuka kunci
+  const np = (await c.call('POST', `/api/sesis/${s2.id}/pin`, {})).body.pin;
+  const again = await fetch(`${base}/g/${s2.token}/api/pin`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '7.7.7.7' }, body: JSON.stringify({ pin: np }) });
+  assert.equal(again.status, 200);
+  const h = (await db.one('SELECT pin_hash FROM sesis WHERE id=$1', [s2.id])).pin_hash;
+  assert.match(h, /^scrypt\$/, 'PIN di-hash scrypt bersalt');
+});
+
+test('audit #10: percobaan PIN paralel tetap dihitung atomik', async () => {
+  const c = await owner();
+  const s = await sesi(c);
+  const rs = await Promise.all(Array.from({ length: 20 }, () => fetch(`${base}/g/${s.token}/api/pin`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '5.5.5.5' }, body: JSON.stringify({ pin: '0000' }) })));
+  const wrong = rs.filter((r) => r.status === 400).length;
+  assert.ok(wrong <= 5, `paling banyak 5 percobaan salah dievaluasi sebelum terkunci, dapat ${wrong}`);
+});
+
+test('audit #4: link bayar lama tidak bisa melunasi tagihan yang sudah bertambah', async () => {
+  const oldKey = config.midtransServerKey;
+  config.midtransServerKey = 'SB-Mid-server-test';
+  const sign = (n) => ({ ...n, signature_key: crypto.createHash('sha512').update(`${n.order_id}${n.status_code}${n.gross_amount}${config.midtransServerKey}`).digest('hex') });
+  try {
+    const c = await owner();
+    const s = await sesi(c, { kuota: 1, durasi_pilih_menit: 0 });
+    const p = await pelanggan(s);
+    await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 1 });
+    await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 2 });
+    await db.q("UPDATE tagihans SET order_id='GS-T-old', payment_total=20000 WHERE sesi_id=$1", [s.id]);
+    await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 3 }); // total naik ke 40rb → link lama batal
+    let t = await db.one('SELECT * FROM tagihans WHERE sesi_id=$1', [s.id]);
+    assert.equal(t.order_id, null);
+    assert.equal(Number(t.total_rupiah), 40000);
+    // Bayar link lama Rp20rb: ditolak meski signature sah
+    await db.q("UPDATE tagihans SET order_id='GS-T-old', payment_total=20000 WHERE sesi_id=$1", [s.id]);
+    await p.call('POST', '/api/webhooks/midtrans', sign({ order_id: 'GS-T-old', status_code: '200', gross_amount: '20000.00', transaction_status: 'settlement', payment_type: 'qris' }));
+    t = await db.one('SELECT * FROM tagihans WHERE sesi_id=$1', [s.id]);
+    assert.equal(t.status_bayar, 'belum_bayar');
+  } finally { config.midtransServerKey = oldKey; }
+});
+
+test('audit #5: folder Drive studio lain tidak bisa ditautkan', async () => {
+  const a = await owner();
+  const b = await owner();
+  const folder = 'FolderMilikA_' + Date.now();
+  assert.equal((await a.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'service_account', folder_id: folder })).status, 200);
+  assert.equal((await b.call('POST', '/api/sesis', { pelanggan_nama: 'Y', sumber: 'service_account', folder_id: folder })).status, 403);
+  assert.equal((await b.call('POST', '/api/drive/cek', { sumber: 'service_account', folder_id: folder })).status, 403);
+  assert.equal((await a.call('POST', '/api/sesis', { pelanggan_nama: 'Z', sumber: 'service_account', folder_id: folder })).status, 200, 'pemilik tetap bisa memakai foldernya');
+});
+
+test('audit #6: nomor WA platform hanya untuk studio yang diizinkan', async () => {
+  const wa = require('../src/wa');
+  const old = [config.waToken, config.waPhoneNumberId];
+  config.waToken = 'x'; config.waPhoneNumberId = '123';
+  try {
+    assert.equal(wa.configured({ wa_platform: false }), false);
+    assert.equal(wa.configured({ wa_platform: true }), true);
+  } finally { [config.waToken, config.waPhoneNumberId] = old; }
+});
+
+test('audit #12: user cabang tidak melihat notifikasi/dasbor cabang lain; editor tidak melihat daftar tim', async () => {
+  const c = await owner();
+  const a = (await c.call('POST', '/api/cabangs', { nama: 'A' })).body;
+  const b = (await c.call('POST', '/api/cabangs', { nama: 'B' })).body;
+  const sb = await sesi(c, { cabang_id: b.id, judul: 'Rahasia Cabang B' });
+  const pb = await pelanggan(sb);
+  void pb;
+  const inv = (await c.call('POST', '/api/tim/undang', { email: `ca${Date.now()}@x.id`, peran: 'admin' })).body;
+  const u = new Client();
+  await u.call('POST', '/api/auth/invite/accept', { token: inv.link.split('/undangan/')[1], nama: 'Kasir A', password: 'rahasia123' });
+  const uid = (await u.call('GET', '/api/me')).body.user.id;
+  await c.call('PUT', `/api/tim/${uid}`, { cabang_id: a.id });
+  const notif = (await u.call('GET', '/api/notifikasi')).body;
+  assert.ok(!notif.some((n) => /Rahasia Cabang B/.test(n.pesan)));
+  assert.equal((await u.call('GET', '/api/dasbor')).body.total, 0);
+  // Staf cabang A tidak dianggap staf di galeri cabang B
+  assert.equal((await u.call('GET', `/g/${sb.token}/api/info`)).body.perlu_pin, true);
+  const inv2 = (await c.call('POST', '/api/tim/undang', { email: `ed2${Date.now()}@x.id`, peran: 'editor' })).body;
+  const e = new Client();
+  await e.call('POST', '/api/auth/invite/accept', { token: inv2.link.split('/undangan/')[1], nama: 'Ed', password: 'rahasia123' });
+  assert.equal((await e.call('GET', '/api/tim')).status, 403);
+});
+
+test('audit #11: top up kedaluwarsa tidak bisa disetujui', async () => {
+  config.billingEnabled = true;
+  try {
+    const c = await owner();
+    const admin = await owner();
+    const meA = (await admin.call('GET', '/api/me')).body;
+    await db.q('UPDATE users SET superadmin=true WHERE id=$1', [meA.user.id]);
+    const png = 'data:image/png;base64,' + (await require('sharp')({ create: { width: 20, height: 20, channels: 3, background: '#fff' } }).png().toBuffer()).toString('base64');
+    await admin.call('PUT', '/api/admin/qris', { data_url: png });
+    const t = (await c.call('POST', '/api/langganan/topup', { nominal: 50000 })).body;
+    await db.q("UPDATE topups SET kedaluwarsa = now() - interval '1 minute' WHERE id=$1", [t.id]);
+    assert.equal((await admin.call('POST', `/api/admin/topups/${t.id}/setujui`)).status, 400);
+  } finally { config.billingEnabled = false; }
+});
+
+test('audit #8: ekspor CSV menetralkan formula', async () => {
+  const csv = F.csv([{ nomor: 1, nama_file: '=HYPERLINK("x")', catatan: '+1', path_subfolder: '@a' }], 1);
+  assert.ok(!/,=|,\+|,@/.test(csv.split('\r\n')[1]));
 });

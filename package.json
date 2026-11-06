@@ -5,9 +5,10 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
+    "dev": "NODE_ENV=development node --watch src/server.js",
     "migrate": "node -e \"require('./src/db').migrate().then(()=>process.exit(0)).catch(e=>{console.error(e);process.exit(1)})\"",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "test": "NODE_ENV=test node --test --test-concurrency=1 test/*.test.js",
+    "superadmin": "node scripts/superadmin.js"
   },
   "repository": {
     "type": "git",

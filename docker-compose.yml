@@ -4,8 +4,9 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    # Hanya bisa diakses dari mesin ini (lewat reverse proxy Nginx/Caddy). Jangan buka port 3000 ke internet.
     ports:
-      - "${HOST_PORT:-3000}:3000"
+      - "127.0.0.1:${HOST_PORT:-3000}:3000"
     volumes:
       - galeri-data:/data
     # Kalau Postgres jalan langsung di host VPS (bukan container), pakai host.docker.internal di DATABASE_URL

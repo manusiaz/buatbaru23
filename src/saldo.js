@@ -21,8 +21,13 @@ async function createTopup(studioId, userId, nominal) {
   const pending = await db.one("SELECT count(*)::int AS n FROM topups WHERE studio_id=$1 AND status='menunggu' AND kedaluwarsa > now()", [studioId]);
   if (pending.n >= MAX_PENDING) throw bad(`Masih ada ${pending.n} top up menunggu konfirmasi. Selesaikan atau batalkan dulu.`);
   // Kode unik 1–999 ditambahkan ke nominal agar transfer mudah dicocokkan dengan mutasi rekening
-  for (let i = 0; i < 20; i++) {
+  const global = await db.one("SELECT count(*)::int AS n FROM topups WHERE status='menunggu' AND kedaluwarsa > now()");
+  if (global.n >= 500) throw new HttpError(503, 'Antrean top up sedang penuh. Coba lagi nanti.');
+  for (let i = 0; i < 30; i++) {
     const kode = crypto.randomInt(1, 1000);
+    // Jumlah transfer yang sama tidak dipakai ulang dalam 7 hari, agar transfer telat tidak tertukar ke studio lain
+    const dipakai = await db.one("SELECT 1 FROM topups WHERE jumlah_transfer=$1 AND dibuat_pada > now() - interval '7 days'", [n + kode]);
+    if (dipakai) continue;
     try {
       return await db.one(`INSERT INTO topups(studio_id, nominal, kode_unik, jumlah_transfer, dibuat_oleh, kedaluwarsa)
         VALUES ($1,$2,$3,$4,$5, now() + interval '${TOPUP_JAM} hours') RETURNING *`, [studioId, n, kode, n + kode, userId]);
@@ -49,6 +54,7 @@ async function approveTopup(id, aktor) {
     const t = (await c.query('SELECT * FROM topups WHERE id=$1 FOR UPDATE', [id])).rows[0];
     if (!t) throw notFound('Top up tidak ditemukan.');
     if (t.status !== 'menunggu') throw bad(`Top up sudah ${t.status}.`);
+    if (new Date(t.kedaluwarsa) < Date.now()) throw bad('Top up sudah kedaluwarsa. Minta studio membuat top up baru, atau koreksi saldo manual dengan alasan.');
     const s = (await c.query('UPDATE studios SET saldo = saldo + $2 WHERE id=$1 RETURNING saldo', [t.studio_id, t.jumlah_transfer])).rows[0];
     await c.query("UPDATE topups SET status='disetujui', diproses_oleh=$2, diproses_pada=now() WHERE id=$1", [id, aktor]);
     await addLedger(c, t.studio_id, 'topup', Number(t.jumlah_transfer), Number(s.saldo), `Top up QRIS #${t.id}`, `topup:${t.id}`, aktor);
@@ -125,7 +131,7 @@ function rupiah(n) { return 'Rp ' + Math.round(Number(n) || 0).toLocaleString('i
 
 let timer = null;
 function start() {
-  timer = setInterval(() => autoRenew().catch((e) => console.error('[saldo]', e.message)), 30 * 60 * 1000);
+  timer = setInterval(() => autoRenew().catch((e) => console.error('[saldo]', e.message)), 5 * 60 * 1000);
   timer.unref();
   setTimeout(() => autoRenew().catch(() => {}), 20000).unref();
 }

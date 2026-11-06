@@ -35,7 +35,7 @@
       e.preventDefault(); btn.disabled = true; er.textContent = '';
       api('POST', '/api/auth/login', { email: em.input.value, password: pw.input.value }).then(done).catch(function (x) { er.textContent = x.message; btn.disabled = false; });
     } }, h('h2.display-lg', 'Masuk'), h('p.muted', { style: { margin: 0 } }, 'Kelola galeri dan pilihan pelangganmu.'), googleButton(), em.el, pw.el, er, btn,
-    h('p.small', 'Belum punya studio? ', h('a', { href: '/daftar' + location.search }, 'Daftar gratis'))));
+    cfg.registrasi === false ? null : h('p.small', 'Belum punya studio? ', h('a', { href: '/daftar' + location.search }, 'Daftar gratis'))));
   }
 
   function daftar() {

@@ -9,7 +9,7 @@ const { HttpError } = require('./http');
 
 function createApp() {
   const app = express();
-  app.set('trust proxy', config.trustProxy === 'true' ? true : config.trustProxy);
+  app.set('trust proxy', config.trustProxy);
   app.disable('x-powered-by');
 
   app.use((req, res, next) => {
@@ -17,6 +17,19 @@ function createApp() {
     res.set('Referrer-Policy', 'same-origin');
     res.set('X-Frame-Options', 'SAMEORIGIN');
     res.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.set('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    // CSP: skrip hanya dari server sendiri + Google (login, Picker). Tidak ada inline script.
+    res.set('Content-Security-Policy', [
+      "default-src 'self'",
+      "script-src 'self' https://apis.google.com https://accounts.google.com",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com",
+      "font-src 'self' https://fonts.gstatic.com",
+      "img-src 'self' data: blob: https://*.googleusercontent.com https://*.gstatic.com",
+      "connect-src 'self' https://accounts.google.com https://www.googleapis.com",
+      "frame-src https://accounts.google.com https://docs.google.com https://drive.google.com",
+      "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'self'",
+    ].join('; '));
+    if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     next();
   });
 

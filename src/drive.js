@@ -195,7 +195,7 @@ function parseExifTime(t) {
 
 async function getFileMeta(ctx, fileId, resourceKey) {
   const url = withKey(ctx, new URL(`${API}/files/${encodeURIComponent(fileId)}`));
-  url.searchParams.set('fields', 'id,thumbnailLink,mimeType');
+  url.searchParams.set('fields', 'id,thumbnailLink,mimeType,size');
   url.searchParams.set('supportsAllDrives', 'true');
   const res = await driveFetch(ctx, url, { resourceKeys: resourceKey ? [`${fileId}/${resourceKey}`] : [] });
   return res.json();
@@ -203,15 +203,31 @@ async function getFileMeta(ctx, fileId, resourceKey) {
 
 // Ambil gambar sumber untuk pratinjau. Utamakan thumbnailLink (murah, tidak mengunduh file asli);
 // thumbnailLink hanya berlaku beberapa jam, jadi minta yang baru lewat files.get bila perlu.
+const MAX_THUMB_BYTES = 25 * 1024 * 1024;
+const MAX_ORIGINAL_BYTES = 60 * 1024 * 1024;
+// Baca body dengan batas ukuran (cegah satu file raksasa menghabiskan memori server)
+async function readCapped(res, max) {
+  const len = Number(res.headers.get('content-length') || 0);
+  if (len && len > max) throw new DriveError('File terlalu besar untuk pratinjau.', 'too_large');
+  const chunks = []; let total = 0;
+  for await (const chunk of res.body) {
+    total += chunk.length;
+    if (total > max) throw new DriveError('File terlalu besar untuk pratinjau.', 'too_large');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 async function fetchImage(ctx, file, size) {
   const meta = await getFileMeta(ctx, file.drive_file_id, file.resource_key);
   if (meta.thumbnailLink) {
     const link = meta.thumbnailLink.replace(/=s\d+(-[a-z0-9-]+)?$/i, `=s${size}`);
     const headers = await authHeaders(ctx);
     const res = await fetch(link, { headers: headers.authorization ? { authorization: headers.authorization } : {} });
-    if (res.ok) return Buffer.from(await res.arrayBuffer());
+    if (res.ok) return readCapped(res, MAX_THUMB_BYTES);
   }
   // Fallback: unduh file asli (200 unit kuota). Hanya untuk format yang bisa dibaca sharp.
+  if (meta.size && Number(meta.size) > MAX_ORIGINAL_BYTES) throw new DriveError('File terlalu besar dan tidak punya thumbnail.', 'too_large');
   if (!/^image\/(jpeg|png|webp|tiff|gif|heic|heif)$/i.test(meta.mimeType || '')) {
     throw new DriveError('Pratinjau tidak tersedia untuk format ini.', 'no_thumbnail');
   }
@@ -219,7 +235,7 @@ async function fetchImage(ctx, file, size) {
   url.searchParams.set('alt', 'media');
   url.searchParams.set('supportsAllDrives', 'true');
   const res = await driveFetch(ctx, url, { resourceKeys: file.resource_key ? [`${file.drive_file_id}/${file.resource_key}`] : [] });
-  return Buffer.from(await res.arrayBuffer());
+  return readCapped(res, MAX_ORIGINAL_BYTES);
 }
 
 // F-51: bagikan folder yang dipilih lewat Google Picker ke service account (Viewer), memakai token drive.file milik studio.
@@ -256,7 +272,9 @@ async function writeFetch(url, opts = {}, attempt = 0) {
 }
 async function ensureSubfolder(parentId, name) {
   const q = new URL(`${API}/files`);
-  q.searchParams.set('q', `'${parentId}' in parents and name = '${name.replace(/'/g, "\\'")}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
+  const safeName = String(name).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  if (!/^[A-Za-z0-9_-]+$/.test(parentId)) throw new DriveError('ID folder tidak valid.', 'bad_id');
+  q.searchParams.set('q', `'${parentId}' in parents and name = '${safeName}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
   q.searchParams.set('fields', 'files(id)');
   q.searchParams.set('supportsAllDrives', 'true');
   q.searchParams.set('includeItemsFromAllDrives', 'true');

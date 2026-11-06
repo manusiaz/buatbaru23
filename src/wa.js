@@ -9,7 +9,8 @@ function credsFor(studio) {
   if (studio.wa_phone_number_id && studio.wa_token_enc) {
     try { return { phoneId: studio.wa_phone_number_id, token: decrypt(studio.wa_token_enc) }; } catch { /* abaikan */ }
   }
-  if (config.waToken && config.waPhoneNumberId) return { phoneId: config.waPhoneNumberId, token: config.waToken };
+  // Nomor platform hanya untuk studio yang diizinkan super admin (cegah spam dari studio yang baru daftar)
+  if (studio.wa_platform && config.waToken && config.waPhoneNumberId) return { phoneId: config.waPhoneNumberId, token: config.waToken };
   return null;
 }
 function configured(studio) { return !!credsFor(studio); }

@@ -25,7 +25,10 @@ async function recomputeTagihan(c, sesi) {
   // Status bayar kembali "belum" bila tagihan berubah setelah lunas
   await c.query(`INSERT INTO tagihans(sesi_id, jumlah_foto, total_rupiah) VALUES ($1,$2,$3)
     ON CONFLICT (sesi_id) DO UPDATE SET jumlah_foto=EXCLUDED.jumlah_foto, total_rupiah=EXCLUDED.total_rupiah, diubah_pada=now(),
-      status_bayar = CASE WHEN tagihans.status_bayar='lunas' AND EXCLUDED.total_rupiah > COALESCE(tagihans.payment_total, tagihans.total_rupiah) THEN 'belum_bayar' ELSE tagihans.status_bayar END`,
+      status_bayar = CASE WHEN tagihans.status_bayar='lunas' AND EXCLUDED.total_rupiah > COALESCE(tagihans.payment_total, tagihans.total_rupiah) THEN 'belum_bayar' ELSE tagihans.status_bayar END,
+      -- total berubah: link pembayaran lama tidak berlaku lagi
+      order_id = CASE WHEN EXCLUDED.total_rupiah <> tagihans.total_rupiah THEN NULL ELSE tagihans.order_id END,
+      payment_url = CASE WHEN EXCLUDED.total_rupiah <> tagihans.total_rupiah THEN NULL ELSE tagihans.payment_url END`,
   [sesi.id, tambahan, total]);
   return { jumlah: n, tambahan, total };
 }

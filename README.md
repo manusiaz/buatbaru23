@@ -26,7 +26,8 @@ Alurnya begini. Studio menautkan folder Google Drive hasil sesi. Pelanggan lalu 
    - **Docker:** `docker compose up -d --build`. Pratinjau disimpan di volume `galeri-data`.
    - **Tanpa Docker:** `npm ci --omit=dev && npm start` (pakai pm2/systemd agar tetap hidup).
    - **Coolify / Dokploy / Easypanel / CapRover:** sambungkan repo GitHub ini, pilih build dari `Dockerfile`, isi environment variable dari `.env.example`, lalu mount volume ke `/data`.
-4. Pasang reverse proxy HTTPS (Nginx/Caddy/Traefik) ke port 3000 dan set `TRUST_PROXY=true`.
+4. Pasang reverse proxy HTTPS (Nginx/Caddy/Traefik) ke `127.0.0.1:3000` dan set `TRUST_PROXY=1` (jumlah proxy). **Jangan** `TRUST_PROXY=true` dan jangan buka port 3000 ke internet; compose sudah mengikat port ke `127.0.0.1`.
+   Contoh Nginx: `proxy_pass http://127.0.0.1:3000; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header Host $host; client_max_body_size 8m;`
 5. Buka `BASE_URL`, tekan **Coba gratis**, lalu daftar studio. Untuk mencoba alur tanpa Google, pilih sumber **Foto contoh** saat membuat galeri.
 
 Cek kesehatan: `GET /healthz`. Tabel dibuat otomatis saat start (lihat `migrations/`).
@@ -81,7 +82,7 @@ Tanpa variabel di atas, aplikasi tetap jalan dengan sumber **Foto contoh**. Pili
 | F-12 | Buat sesi massal dari CSV (nama, no_wa, link_folder, paket, judul, tanggal, pin), salin semua link+PIN, kirim WA per baris | Galeri › Buat massal (CSV) |
 | F-36 | Harga bertingkat foto tambahan (mis. `5=100000`); sistem memilih total termurah | Paket & harga, buat/ubah sesi |
 
-**Super admin** (`SUPERADMIN_EMAILS`): ringkasan platform, unggah QRIS statis, setujui/tolak top up (lihat bukti transfer), koreksi saldo dengan alasan, daftar tenant, ubah paket/masa berlaku, tangguhkan studio, log audit.
+**Super admin** (ditandai lewat CLI: `node scripts/superadmin.js tambah email@kamu.com`, bukan lewat env): ringkasan platform, unggah QRIS statis, setujui/tolak top up (lihat bukti transfer), koreksi saldo dengan alasan, daftar tenant, ubah paket/masa berlaku, tangguhkan studio, log audit.
 
 **Pengaman saldo:** saldo hanya bertambah lewat persetujuan super admin; persetujuan & pembayaran berjalan dalam transaksi database dengan row lock (persetujuan ganda / pemakaian saldo ganda secara paralel diuji); constraint `saldo >= 0`; buku besar `saldo_mutasi` tidak bisa di-UPDATE/DELETE (trigger); nominal top up hanya dari daftar tetap; bukti transfer di-encode ulang dan hanya bisa dilihat studio pemiliknya & super admin; semua aksi super admin masuk audit.
 
@@ -97,15 +98,39 @@ Semua fitur di atas jalan tanpa kredensial pihak ketiga **kecuali** yang memang 
 
 Tanpa kredensial, tombolnya disembunyikan atau memberi pesan jelas, dan alur manual (wa.me, bayar di kasir) tetap jalan.
 
+## Keamanan
+
+Audit keamanan independen dijalankan (exploit dicoba langsung). Semua temuan sudah diperbaiki dan punya tes regresi (`test/app.test.js`, bagian "Regresi audit keamanan"):
+
+| Temuan | Perbaikan |
+| --- | --- |
+| Kritis: siapa pun bisa jadi super admin dengan mendaftar email yang ada di `SUPERADMIN_EMAILS` | Super admin = flag `users.superadmin` yang hanya bisa diset lewat CLI di server |
+| Tinggi: kunci PIN & rate limit bisa dilewati dengan memalsukan `X-Forwarded-For` (`TRUST_PROXY=true`) | `TRUST_PROXY` = jumlah hop (`1`); nilai `true` diturunkan jadi 1; port Docker hanya `127.0.0.1` |
+| Tinggi: satu orang bisa mengunci input PIN semua pelanggan (semua request terlihat dari IP proxy) | Limiter PIN per galeri + IP; batas tambahan 30 gagal/jam per galeri (lintas IP) yang mengunci galeri itu saja dan memberi tahu studio |
+| Menengah-tinggi: bayar dengan link lama yang nominalnya lebih kecil tetap dianggap lunas | Link bayar dibatalkan saat total berubah; webhook mewajibkan nominal ≥ total terkini |
+| Menengah: studio lain bisa membaca folder Drive lewat service account bersama | Folder terikat ke studio pertama yang menautkannya; escape query Drive diperbaiki |
+| Menengah: nomor WA platform bisa dipakai spam oleh studio baru | Hanya studio yang diizinkan super admin; `ALLOW_REGISTRATION=false` untuk instalasi satu studio |
+| Menengah: file Drive raksasa bisa menghabiskan memori | Batas unduhan 25 MB (thumbnail) / 60 MB (asli) + batas piksel `sharp` |
+| Menengah: injeksi formula di ekspor CSV | Sel diawali `= + - @` diberi prefiks `'` |
+| Rendah: login Google menempel ke akun berkata sandi milik email yang sama | Tidak ditautkan otomatis |
+| Rendah: race percobaan PIN paralel | Jatah percobaan dipesan atomik sebelum PIN dicek |
+| Rendah: top up kedaluwarsa / kode unik dipakai ulang | Top up kedaluwarsa tidak bisa disetujui; jumlah transfer tidak dipakai ulang 7 hari; batas antrean global |
+| Rendah: staf cabang/editor melihat data di luar cakupannya | Dasbor, notifikasi, dan akses galeri difilter per cabang/penugasan; daftar tim hanya admin/owner |
+| Rendah: PIN di-hash SHA-256 polos; `APP_SECRET` punya nilai bawaan; tanpa CSP | PIN di-hash scrypt bersalt; app menolak start tanpa `APP_SECRET` ≥ 32 karakter; CSP + HSTS aktif |
+
+Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat API, CSRF, path traversal, tanda tangan URL media, SSRF.
+
+Catatan sisa: email saat daftar belum diverifikasi (butuh SMTP). Akibatnya orang bisa "menduduki" email orang lain sebelum pemiliknya mendaftar, tapi tidak bisa mengambil alih akun yang sudah ada.
+
 ## Pengembangan
 
 ```bash
 npm install
 cp .env.example .env    # isi DATABASE_URL lokal
-npm run dev             # http://localhost:3000
+npm run dev             # http://localhost:3000 (NODE_ENV=development)
 ```
 
-Tes integrasi (22 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (31 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

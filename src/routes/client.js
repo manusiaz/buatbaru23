@@ -6,7 +6,7 @@ const db = require('../db');
 const media = require('../media');
 const S = require('../sesi');
 const { notify } = require('../notify');
-const { randomToken, sha256, safeEqual } = require('../security');
+const { randomToken, sha256, verifyPin } = require('../security');
 const { currentUser } = require('../auth');
 const { HttpError, bad, notFound, ah, str, int, parseCookies, setCookie } = require('../http');
 const { limit } = require('../ratelimit');
@@ -36,7 +36,9 @@ async function context(req) {
   let authed = false;
   if (c) authed = !!(await db.one('SELECT 1 FROM client_sessions WHERE token_hash=$1 AND sesi_id=$2 AND kedaluwarsa>now()', [sha256(c), sesi.id]));
   const user = await currentUser(req);
-  const staff = !!(user && user.studio_id === sesi.studio_id);
+  // Staf hanya dianggap staf untuk galeri yang memang boleh ia lihat (cabang & penugasan editor)
+  const staff = !!(user && user.studio_id === sesi.studio_id && (!user.cabang_id || user.cabang_id === sesi.cabang_id)
+    && (user.peran !== 'editor' || !sesi.editor_id || sesi.editor_id === user.id));
   const tagihan = await db.one('SELECT jumlah_foto, total_rupiah, status_bayar, metode FROM tagihans WHERE sesi_id=$1', [sesi.id]);
   return { sesi, studio, pel, authed, staff, tagihan };
 }
@@ -65,7 +67,7 @@ function infoOut(ctx) {
   const s = ctx.sesi;
   return {
     studio: studioPublic(ctx.studio),
-    judul: s.judul, jenis: s.jenis, tanggal_sesi: s.tanggal_sesi, pelanggan: ctx.pel.nama,
+    judul: s.judul, jenis: s.jenis, tanggal_sesi: s.tanggal_sesi, pelanggan: ctx.authed || ctx.staff ? ctx.pel.nama : null,
     kuota: s.kuota, durasi_pilih_menit: s.durasi_pilih_menit, harga_foto_tambahan: s.harga_foto_tambahan,
     maks_foto_tambahan: s.maks_foto_tambahan, tenggat_link: s.tenggat_link, izin_catatan: s.izin_catatan,
     tampil_nama_file: s.tampil_nama_file || (ctx.staff && !ctx.authed),
@@ -100,26 +102,46 @@ r.get('/info', ah(async (req, res) => {
   res.json(infoOut(ctx));
 }));
 
-r.post('/pin', limit('pin', 30, 15 * 60), ah(async (req, res) => {
+const GALERI_MAX_GAGAL = 30; // semua IP, per jam
+r.post('/pin', limit('pin', 30, 15 * 60, (req) => `${req.params.token}:${req.ip}`), ah(async (req, res) => {
   const sesi = await findSesi(req.params.token);
   if (!sesi) throw notFound('Galeri tidak ditemukan.');
   const pin = String(req.body.pin || '').trim();
   const ip = req.ip || 'unknown';
-  const att = await db.one('SELECT * FROM pin_attempts WHERE sesi_id=$1 AND ip=$2', [sesi.id, ip]);
-  if (att && att.kunci_sampai && new Date(att.kunci_sampai) > Date.now()) {
-    const sisa = Math.ceil((new Date(att.kunci_sampai) - Date.now()) / 60000);
-    throw new HttpError(429, `PIN terkunci karena ${MAX_GAGAL} kali salah. Coba lagi dalam ${sisa} menit.`, { terkunci_sampai: att.kunci_sampai });
+  const locked = (until) => until && new Date(until) > Date.now();
+  const lockedMsg = (until) => new HttpError(429, `PIN terkunci karena terlalu banyak percobaan salah. Coba lagi dalam ${Math.ceil((new Date(until) - Date.now()) / 60000)} menit atau hubungi studio.`, { terkunci_sampai: until });
+  const gal = await db.one('SELECT kunci_sampai FROM pin_galeri WHERE sesi_id=$1', [sesi.id]);
+  if (locked(gal && gal.kunci_sampai)) throw lockedMsg(gal.kunci_sampai);
+  // "Pesan" satu percobaan secara atomik SEBELUM PIN dicek, sehingga request paralel tidak bisa
+  // mengevaluasi lebih dari MAX_GAGAL tebakan per IP.
+  const r1 = await db.one(`INSERT INTO pin_attempts(sesi_id, ip, gagal) VALUES ($1,$2,1)
+    ON CONFLICT (sesi_id, ip) DO UPDATE SET
+      gagal = CASE WHEN pin_attempts.kunci_sampai IS NOT NULL AND pin_attempts.kunci_sampai < now() THEN 1 ELSE pin_attempts.gagal + 1 END,
+      kunci_sampai = CASE WHEN pin_attempts.kunci_sampai < now() THEN NULL ELSE pin_attempts.kunci_sampai END
+    RETURNING gagal, kunci_sampai`, [sesi.id, ip]);
+  if (locked(r1.kunci_sampai)) throw lockedMsg(r1.kunci_sampai);
+  if (r1.gagal > MAX_GAGAL) {
+    const k = await db.one(`UPDATE pin_attempts SET kunci_sampai = COALESCE(kunci_sampai, now() + interval '${KUNCI_MENIT} minutes')
+      WHERE sesi_id=$1 AND ip=$2 RETURNING kunci_sampai`, [sesi.id, ip]);
+    throw lockedMsg(k.kunci_sampai);
   }
-  if (!/^\d{4,6}$/.test(pin) || !safeEqual(sha256(`pin:${pin}`), sesi.pin_hash)) {
-    const gagal = (att ? att.gagal : 0) + 1;
-    const kunci = gagal >= MAX_GAGAL ? new Date(Date.now() + KUNCI_MENIT * 60000) : null;
-    await db.q(`INSERT INTO pin_attempts(sesi_id, ip, gagal, kunci_sampai) VALUES ($1,$2,$3,$4)
-      ON CONFLICT (sesi_id, ip) DO UPDATE SET gagal=$3, kunci_sampai=$4`, [sesi.id, ip, kunci ? 0 : gagal, kunci]);
-    if (kunci) {
-      await S.logEvent(null, sesi.id, 'pin_terkunci', 'sistem', { ip });
-      throw new HttpError(429, `PIN terkunci ${KUNCI_MENIT} menit karena ${MAX_GAGAL} kali salah.`, { terkunci_sampai: kunci });
+  if (!/^\d{4,6}$/.test(pin) || !verifyPin(pin, sesi.pin_hash)) {
+    const r2 = await db.one(`INSERT INTO pin_galeri(sesi_id, gagal) VALUES ($1,1)
+      ON CONFLICT (sesi_id) DO UPDATE SET
+        gagal = CASE WHEN pin_galeri.jendela_mulai < now() - interval '1 hour' THEN 1 ELSE pin_galeri.gagal + 1 END,
+        jendela_mulai = CASE WHEN pin_galeri.jendela_mulai < now() - interval '1 hour' THEN now() ELSE pin_galeri.jendela_mulai END
+      RETURNING gagal`, [sesi.id]);
+    if (r2.gagal >= GALERI_MAX_GAGAL) {
+      await db.q(`UPDATE pin_galeri SET kunci_sampai = now() + interval '${KUNCI_MENIT} minutes', gagal=0, jendela_mulai=now() WHERE sesi_id=$1`, [sesi.id]);
+      await S.logEvent(null, sesi.id, 'pin_terkunci', 'sistem', { cakupan: 'galeri' });
+      await notify(sesi.studio_id, sesi.id, 'pin_terkunci', `${sesi.judul}: PIN dikunci ${KUNCI_MENIT} menit karena banyak percobaan salah. Pertimbangkan ganti PIN.`);
     }
-    throw bad(`PIN salah. Sisa ${MAX_GAGAL - gagal} percobaan.`, { sisa: MAX_GAGAL - gagal });
+    if (r1.gagal >= MAX_GAGAL) {
+      await db.q(`UPDATE pin_attempts SET kunci_sampai = now() + interval '${KUNCI_MENIT} minutes' WHERE sesi_id=$1 AND ip=$2`, [sesi.id, ip]);
+      await S.logEvent(null, sesi.id, 'pin_terkunci', 'sistem', { ip });
+      throw new HttpError(429, `PIN terkunci ${KUNCI_MENIT} menit karena ${MAX_GAGAL} kali salah.`);
+    }
+    throw bad(`PIN salah. Sisa ${MAX_GAGAL - r1.gagal} percobaan.`, { sisa: MAX_GAGAL - r1.gagal });
   }
   await db.q('DELETE FROM pin_attempts WHERE sesi_id=$1 AND ip=$2', [sesi.id, ip]);
   const token = randomToken(32);

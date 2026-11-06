@@ -36,4 +36,21 @@ function randomPin(len = 6) {
   return s;
 }
 
-module.exports = { randomToken, sha256, hmac, encrypt, decrypt, safeEqual, randomPin };
+// PIN di-hash scrypt dengan salt acak (bukan sha256 polos yang bisa dibalik dalam sekejap)
+function hashPin(pin) {
+  const salt = crypto.randomBytes(16);
+  const h = crypto.scryptSync(String(pin), salt, 32, { N: 16384, r: 8, p: 1 });
+  return `scrypt$${salt.toString('base64url')}$${h.toString('base64url')}`;
+}
+function verifyPin(pin, stored) {
+  const s = String(stored || '');
+  if (s.startsWith('scrypt$')) {
+    const [, salt, hash] = s.split('$');
+    const h = crypto.scryptSync(String(pin), Buffer.from(salt, 'base64url'), 32, { N: 16384, r: 8, p: 1 });
+    const want = Buffer.from(hash, 'base64url');
+    return want.length === h.length && crypto.timingSafeEqual(want, h);
+  }
+  return safeEqual(sha256(`pin:${pin}`), s); // format lama
+}
+
+module.exports = { hashPin, verifyPin, randomToken, sha256, hmac, encrypt, decrypt, safeEqual, randomPin };
