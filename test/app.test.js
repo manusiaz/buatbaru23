@@ -989,7 +989,7 @@ test('coba gratis 3 hari per studio: setelah habis tidak bisa buat galeri/undang
   assert.equal((await c.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
 });
 
-test('perpanjang masa coba: bayar Rp 5.000 dari saldo = +3 hari, bisa bertumpuk; saldo kurang → tawarkan top up', async () => {
+test('traktir kopi: bayar Rp 5.000 dari saldo = +1 bulan paket Gratis, bisa bertumpuk; saldo kurang → tawarkan top up', async () => {
   config.billingEnabled = true;
   try {
     const a = await owner();
@@ -1001,15 +1001,15 @@ test('perpanjang masa coba: bayar Rp 5.000 dari saldo = +3 hari, bisa bertumpuk;
     assert.equal(kurang.body.topup, true);
     await db.q('UPDATE studios SET saldo=12000 WHERE id=$1', [id]);
     const r1 = (await a.call('POST', '/api/langganan/perpanjang-coba')).body;
-    assert.ok(Math.abs(new Date(r1.trial_sampai) - Date.now() - 3 * 86400000) < 60000, 'habis → +3 hari dari sekarang');
+    assert.ok(Math.abs(new Date(r1.trial_sampai) - Date.now() - 30 * 86400000) < 60000, 'habis → +1 bulan (30 hari) dari sekarang');
     assert.equal(r1.saldo, 7000);
     assert.equal((await a.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 })).status, 200, 'bisa buat galeri lagi');
     const r2 = (await a.call('POST', '/api/langganan/perpanjang-coba')).body;
-    assert.ok(Math.abs(new Date(r2.trial_sampai) - new Date(r1.trial_sampai) - 3 * 86400000) < 5000, 'masih aktif → bertumpuk dari akhir masa coba');
+    assert.ok(Math.abs(new Date(r2.trial_sampai) - new Date(r1.trial_sampai) - 30 * 86400000) < 5000, 'masih aktif → bertumpuk dari akhir masa aktif');
     assert.equal(r2.saldo, 2000);
     assert.equal((await a.call('POST', '/api/langganan/perpanjang-coba')).status, 402, 'saldo Rp 2.000 tidak cukup');
     const m = (await a.call('GET', '/api/langganan')).body.mutasi;
-    assert.equal(m.filter((x) => /Traktir kopi/.test(x.keterangan)).length, 2);
+    assert.equal(m.filter((x) => /Traktir kopi ☕ \(\+1 bulan paket Gratis\)/.test(x.keterangan)).length, 2);
     // Paralel tidak bisa memakai saldo yang sama dua kali
     await db.q('UPDATE studios SET saldo=5000 WHERE id=$1', [id]);
     const par = await Promise.all([a.call('POST', '/api/langganan/perpanjang-coba'), a.call('POST', '/api/langganan/perpanjang-coba')]);

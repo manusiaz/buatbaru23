@@ -121,7 +121,7 @@ async function perpanjangCoba(studioId, aktor) {
     const dari = new Date(Math.max(plans.trialSampai(st).getTime(), Date.now()));
     const sampai = new Date(dari.getTime() + hari * 86400000);
     const r = (await c.query("UPDATE studios SET saldo = saldo - $2, plan='gratis', plan_sampai=$3 WHERE id=$1 RETURNING saldo", [studioId, harga, sampai])).rows[0];
-    await addLedger(c, studioId, 'bayar_paket', -harga, Number(r.saldo), `Traktir kopi ☕ (+${hari} hari paket Gratis)`, `kopi:${hari}`, aktor);
+    await addLedger(c, studioId, 'bayar_paket', -harga, Number(r.saldo), `Traktir kopi ☕ (+${hari % 30 === 0 ? `${hari / 30} bulan` : `${hari} hari`} paket Gratis)`, `kopi:${hari}`, aktor);
     return { saldo: Number(r.saldo), trial_sampai: sampai, harga, hari };
   });
 }

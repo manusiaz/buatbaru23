@@ -124,7 +124,7 @@ Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat A
 
 Berlaku bila `BILLING_ENABLED=true`. Setiap studio dapat **coba gratis 3 hari** (`GRATIS_HARI`) sejak studio itu mendaftar.
 - Setelah habis: tidak bisa membuat galeri baru (termasuk CSV massal) atau mengundang anggota. Galeri yang sudah dikirim tetap bisa dibuka pelanggan sampai tenggatnya. Banner hitung mundur tampil di semua halaman dasbor.
-- **Traktir kopi ☕ Rp 5.000 = +3 hari paket Gratis** (`GRATIS_PERPANJANG_HARGA`, `GRATIS_PERPANJANG_HARI`). Khusus paket Gratis, terpisah dari paket berbayar (Starter/Pro/Bisnis), bukan langganan dan tidak terpotong otomatis. Dibayar dari saldo; bisa diulang dan bertumpuk; bila saldo kurang, studio langsung ditawari top up Rp 5.000 via QRIS.
+- **Traktir kopi ☕ Rp 5.000 = +1 bulan paket Gratis** (`GRATIS_PERPANJANG_HARGA`, `GRATIS_PERPANJANG_HARI`). Khusus paket Gratis, terpisah dari paket berbayar (Starter/Pro/Bisnis), bukan langganan dan tidak terpotong otomatis. Dibayar dari saldo; bisa diulang dan bertumpuk; bila saldo kurang, studio langsung ditawari top up Rp 5.000 via QRIS.
 - Atau pilih paket berbayar (dibayar dari saldo). Paket berbayar yang habis kembali ke kondisi coba-habis.
 - Super admin bisa mengatur tanggal akhir masa coba per studio (Ubah studio › Berlaku sampai).
 

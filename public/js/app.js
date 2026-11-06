@@ -83,10 +83,12 @@
       h('button', { type: 'button', 'aria-label': 'Keluar', title: 'Keluar', onclick: function () { api('POST', '/api/auth/logout', {}).then(function () { location.href = '/masuk'; }); } }, ic('keluar'))));
   }
 
+  function lamaKopi(n) { return n % 30 === 0 ? (n / 30) + ' bulan' : n + ' hari'; }
+
   // Perpanjang masa coba dari saldo; bila saldo kurang, tawarkan top up pas
   function perpanjangCoba() {
     var L = ME.langganan;
-    UI.confirm('Traktir kopi ☕', 'Terima kasih! ' + F.rupiah(L.perpanjang_harga) + ' dipotong dari saldo (' + F.rupiah(L.saldo) + ') dan paket Gratis-mu bertambah ' + L.perpanjang_hari + ' hari. Ini bukan langganan dan tidak terpotong otomatis.', 'Traktir ' + F.rupiah(L.perpanjang_harga)).then(function (ok) {
+    UI.confirm('Traktir kopi ☕', 'Terima kasih! ' + F.rupiah(L.perpanjang_harga) + ' dipotong dari saldo (' + F.rupiah(L.saldo) + ') dan paket Gratis-mu bertambah ' + lamaKopi(L.perpanjang_hari) + '. Ini bukan langganan dan tidak terpotong otomatis.', 'Traktir ' + F.rupiah(L.perpanjang_harga)).then(function (ok) {
       if (!ok) return;
       api('POST', '/api/langganan/perpanjang-coba').then(function (r) {
         UI.toast('Terima kasih kopinya! ☕ Paket Gratis aktif sampai ' + UI.fmtDateTime(r.trial_sampai, tz()));
@@ -107,15 +109,16 @@
     if (!L.billing || !L.trial_sampai) return null;
     var ms = new Date(L.trial_sampai).getTime() - Date.now();
     var link = can('studio.edit') ? h('div.row',
-      L.perpanjang_harga ? h('button.btn.btn-sm.btn-amber', { type: 'button', onclick: perpanjangCoba }, '☕ Traktir kopi ' + F.rupiah(L.perpanjang_harga) + ' · +' + L.perpanjang_hari + ' hari') : null,
+      L.perpanjang_harga ? h('button.btn.btn-sm.btn-amber', { type: 'button', onclick: perpanjangCoba }, '☕ Traktir kopi ' + F.rupiah(L.perpanjang_harga) + ' · +' + lamaKopi(L.perpanjang_hari)) : null,
       h('a.btn.btn-sm.btn-primary', { href: '#/langganan' }, 'Pilih paket')) : h('span.small', 'Minta owner studio memperpanjang atau memilih paket.');
     if (L.trial_habis) {
       return h('div.alert.err', { style: { marginBottom: '16px' } }, h('div.alert-row',
-        h('div', h('b', 'Masa coba gratis ' + L.trial_hari + ' hari sudah berakhir. '), 'Galeri yang sudah dikirim tetap bisa dibuka pelanggan, tapi galeri baru belum bisa dibuat.'), link));
+        h('div', h('b', 'Paket Gratis sudah berakhir. '), 'Galeri yang sudah dikirim tetap bisa dibuka pelanggan, tapi galeri baru belum bisa dibuat.'), link));
     }
+    if (ms > 3 * 86400000) return null; // banner hanya menjelang habis
     var sisa = ms > 86400000 ? Math.ceil(ms / 86400000) + ' hari' : Math.max(1, Math.ceil(ms / 3600000)) + ' jam';
     return h('div.alert', { style: { marginBottom: '16px' } }, h('div.alert-row',
-      h('div', h('b', 'Masa coba gratis berakhir dalam ' + sisa), ' (' + UI.fmtDateTime(L.trial_sampai, tz()) + '). Setelah itu pilih paket agar tetap bisa membuat galeri baru.'), link));
+      h('div', h('b', 'Paket Gratis berakhir dalam ' + sisa), ' (' + UI.fmtDateTime(L.trial_sampai, tz()) + '). Setelah itu pilih paket agar tetap bisa membuat galeri baru.'), link));
   }
 
   function route() {
@@ -1130,7 +1133,7 @@
         box.appendChild(h('div.stats',
           h('div.stat', h('span.label', 'Saldo'), h('div.v', { style: { fontSize: '28px' } }, F.rupiah(d.saldo)), h('div.small.muted', 'Untuk membayar paket bulanan')),
           h('div.stat', h('span.label', 'Paket aktif'), h('div.v', d.nama), h('div.small' + (d.trial_habis ? '' : '.muted'), { style: d.trial_habis ? { color: 'var(--scarlet)', fontWeight: 700 } : null },
-            d.plan === 'gratis' && d.trial_sampai ? (d.trial_habis ? 'Masa coba berakhir ' : 'Coba gratis sampai ') + UI.fmtDateTime(d.trial_sampai, tz()) : d.plan_sampai ? 'Sampai ' + UI.fmtDate(d.plan_sampai, tz()) : '')),
+            d.plan === 'gratis' && d.trial_sampai ? (d.trial_habis ? 'Berakhir ' : 'Aktif sampai ') + UI.fmtDateTime(d.trial_sampai, tz()) : d.plan_sampai ? 'Sampai ' + UI.fmtDate(d.plan_sampai, tz()) : '')),
           h('div.stat', h('span.label', 'Sisa sesi bulan ini'), h('div.v', { style: { fontSize: '26px' } }, sisa), h('div.small.muted', d.pemakaian.sesi_bulan_ini + ' sesi dibuat bulan ini')),
           h('div.stat', h('span.label', 'Pengguna'), h('div.v', d.pemakaian.pengguna + (d.batas_pengguna ? '/' + d.batas_pengguna : '')), h('div.small.muted', 'Anggota tim aktif'))));
         if (owner && d.plan !== 'gratis') {
@@ -1152,14 +1155,14 @@
               h('button.btn.btn-sm.btn-primary', { type: 'button', onclick: function () { bayar(p.kode, 1, p.harga, p.nama + ' 1 bulan'); } }, cur ? 'Perpanjang 1 bulan' : '1 bulan'),
               h('button.btn.btn-sm.btn-secondary', { type: 'button', onclick: function () { bayar(p.kode, 12, p.harga * 10, p.nama + ' 12 bulan'); } }, '12 bulan (hemat 2)')) : null,
             p.harga == null ? h('p.small.muted', 'Multi-cabang, SLA, onboarding. Hubungi tim kami.') : null,
-            p.kode === 'gratis' && d.perpanjang_harga ? h('p.small.muted', 'Habis? Traktir kopi ' + F.rupiah(d.perpanjang_harga) + ' untuk +' + d.perpanjang_hari + ' hari.') : null);
+            p.kode === 'gratis' && d.perpanjang_harga ? h('p.small.muted', 'Habis? Traktir kopi ' + F.rupiah(d.perpanjang_harga) + ' untuk +' + lamaKopi(d.perpanjang_hari) + '.') : null);
         })));
         // Traktir kopi: khusus paket Gratis, terpisah dari paket berbayar
         if (owner && d.plan === 'gratis' && d.perpanjang_harga) {
           box.appendChild(h('section.card', { style: { display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap', background: 'var(--sand)', borderColor: 'var(--sand)' } },
             h('div', { style: { fontSize: '40px', lineHeight: 1 } }, '☕'),
-            h('div', { style: { flex: '1', minWidth: '220px' } }, h('h2.title', 'Traktir kopi, tambah ' + d.perpanjang_hari + ' hari'),
-              h('p.small', { style: { margin: '4px 0 0' } }, 'Masih mau coba sebelum pilih paket? Traktir kami kopi ' + F.rupiah(d.perpanjang_harga) + ' dari saldo, paket Gratis-mu bertambah ' + d.perpanjang_hari + ' hari. Bisa diulang, bukan langganan.')),
+            h('div', { style: { flex: '1', minWidth: '220px' } }, h('h2.title', 'Traktir kopi, tambah ' + lamaKopi(d.perpanjang_hari)),
+              h('p.small', { style: { margin: '4px 0 0' } }, 'Masih mau coba sebelum pilih paket? Traktir kami kopi ' + F.rupiah(d.perpanjang_harga) + ' dari saldo, paket Gratis-mu bertambah ' + lamaKopi(d.perpanjang_hari) + '. Bisa diulang, bukan langganan.')),
             h('button.btn.btn-primary', { type: 'button', onclick: perpanjangCoba }, 'Traktir ' + F.rupiah(d.perpanjang_harga))));
         }
         if (!owner) return;

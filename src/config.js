@@ -40,7 +40,7 @@ const config = {
   gratisHari: Math.max(0, int(env.GRATIS_HARI, 3)),
   // Perpanjang masa coba: bayar dari saldo
   perpanjangHarga: Math.max(0, int(env.GRATIS_PERPANJANG_HARGA, 5000)),
-  perpanjangHari: Math.max(1, int(env.GRATIS_PERPANJANG_HARI, int(env.GRATIS_HARI, 3))),
+  perpanjangHari: Math.max(1, int(env.GRATIS_PERPANJANG_HARI, 30)), // traktir kopi = +1 bulan
   // Nominal top up saldo yang boleh dipilih (Rupiah)
   topupNominal: String(env.TOPUP_NOMINAL || '50000,100000,250000,500000,1000000').split(',').map((x) => parseInt(x, 10)).filter((x) => x > 0 && x <= 100000000),
   // Payment gateway Midtrans (F-35)
