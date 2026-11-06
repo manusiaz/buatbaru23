@@ -884,3 +884,64 @@ test('otomasi: putaran paralel aman (advisory lock)', async () => {
   const dup = await db.one('SELECT count(*)::int AS n FROM (SELECT studio_id, COALESCE(sesi_id,0), kunci FROM followups GROUP BY 1,2,3 HAVING count(*) > 1) z');
   assert.equal(dup.n, 0);
 });
+
+// ======================= Suspend / tangguhkan =======================
+test('tangguhkan galeri: semua akses pelanggan (PIN, info, pilih, gambar) 423; data utuh; pulih kembali', async () => {
+  const c = await owner();
+  const s = await sesi(c, { durasi_pilih_menit: 0 });
+  const p = await pelanggan(s);
+  const st = (await p.call('GET', `/g/${s.token}/api/state`)).body;
+  await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 1 });
+  assert.equal((await c.call('POST', `/api/sesis/${s.id}/tangguhkan`, { alasan: 'belum DP' })).status, 200);
+  const info = await p.call('GET', `/g/${s.token}/api/info`);
+  assert.equal(info.status, 423);
+  assert.equal(info.body.ditangguhkan, true);
+  assert.ok(!JSON.stringify(info.body).includes('belum DP'), 'alasan internal tidak dibocorkan ke pelanggan');
+  assert.equal((await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 2 })).status, 423);
+  assert.equal((await new Client().call('POST', `/g/${s.token}/api/pin`, { pin: s.pin })).status, 423);
+  assert.equal((await fetch(base + st.fotos[0].thumb)).status, 423, 'gambar publik ikut terkunci');
+  // Staf tetap melihat galeri & fotonya di dasbor
+  const d = (await c.call('GET', `/api/sesis/${s.id}`)).body;
+  assert.equal(d.ditangguhkan, true);
+  assert.equal(d.jumlah_pilihan, 1, 'pilihan tetap utuh');
+  assert.equal((await fetch(base + d.fotos[0].thumb)).status, 200, 'URL staf tetap jalan');
+  // URL staf tidak bisa dipalsukan pelanggan
+  assert.equal((await fetch(base + st.fotos[0].thumb + '&staf=1')).status, 403);
+  assert.ok((await c.call('GET', '/api/sesis?status=ditangguhkan')).body.some((x) => x.id === s.id));
+  assert.equal((await c.call('POST', `/api/sesis/${s.id}/pulihkan`)).status, 200);
+  assert.equal((await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 2 })).status, 200, 'cookie lama berlaku lagi');
+  const log = (await c.call('GET', '/api/audit-keamanan')).body.map((a) => a.aksi);
+  assert.ok(log.includes('tangguhkan_galeri') && log.includes('pulihkan_galeri'));
+});
+
+test('tangguhkan pelanggan: semua galerinya terkunci, pengingat berhenti; studio lain tidak bisa', async () => {
+  const c = await owner();
+  await c.call('PUT', '/api/otomasi', { jam_tenang: { mulai: 0, selesai: 0 } });
+  const a = await sesi(c, { pelanggan_wa: '081277778888', masa_aktif_jam: 168 });
+  const b = await sesi(c, { pelanggan_wa: '081277778888', masa_aktif_jam: 168 });
+  const other = await owner();
+  assert.equal((await other.call('POST', `/api/sesis/${a.id}/pelanggan/tangguhkan`)).status, 404);
+  const r = (await c.call('POST', `/api/sesis/${a.id}/pelanggan/tangguhkan`, { alasan: 'komplain' })).body;
+  assert.equal(r.galeri, 2);
+  assert.equal((await new Client().call('GET', `/g/${b.token}/api/info`)).status, 423, 'galeri lain milik pelanggan ini ikut terkunci');
+  await db.q("UPDATE sesis SET link_dikirim_pada = now() - interval '30 hours' WHERE id IN ($1,$2)", [a.id, b.id]);
+  assert.equal((await c.call('POST', '/api/otomasi/jalankan')).body.pelanggan, 0, 'tidak ada pengingat ke pelanggan tertangguh');
+  await c.call('POST', `/api/sesis/${b.id}/pelanggan/pulihkan`);
+  assert.equal((await new Client().call('GET', `/g/${a.token}/api/info`)).status, 200);
+});
+
+test('suspend studio oleh super admin: semua galeri pelanggannya offline, pulih saat diaktifkan', async () => {
+  const admin = await owner();
+  const meA = (await admin.call('GET', '/api/me')).body;
+  await db.q('UPDATE users SET superadmin=true WHERE id=$1', [meA.user.id]);
+  const c = await owner();
+  const s = await sesi(c, { durasi_pilih_menit: 0 });
+  const p = await pelanggan(s);
+  const sid = (await c.call('GET', '/api/me')).body.studio.id;
+  await admin.call('PUT', `/api/admin/studios/${sid}`, { aktif: false });
+  const r = await p.call('GET', `/g/${s.token}/api/state`);
+  assert.equal(r.status, 423);
+  assert.match(r.body.error, /tidak tersedia/);
+  await admin.call('PUT', `/api/admin/studios/${sid}`, { aktif: true });
+  assert.equal((await p.call('GET', `/g/${s.token}/api/state`)).status, 200);
+});

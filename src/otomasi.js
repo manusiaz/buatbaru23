@@ -159,7 +159,8 @@ function vars(st, s) {
   return { nama: s.pelanggan_nama, judul: s.judul, studio: st.nama, link, pin, tenggat: fmtWaktu(s.tenggat_link, st.zona_waktu) };
 }
 
-const SESI_SQL = `SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id WHERE s.studio_id=$1`;
+const SESI_SQL = `SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id WHERE s.studio_id=$1
+  AND s.ditangguhkan_pada IS NULL AND p.ditangguhkan_pada IS NULL`;
 
 async function runStudio(st, stats) {
   const cfg = settings(st);

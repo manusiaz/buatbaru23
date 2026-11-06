@@ -479,7 +479,8 @@ async function loadSesi(req, id) {
   let extra = '';
   if (req.user.peran === 'editor') { params.push(req.user.id); extra += ` AND (s.editor_id = $${params.length} OR s.editor_id IS NULL)`; }
   if (req.user.cabang_id) { params.push(req.user.cabang_id); extra += ` AND s.cabang_id = $${params.length}`; }
-  const s = await db.one(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, pk.nama AS paket_nama, cb.nama AS cabang_nama
+  const s = await db.one(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, p.ditangguhkan_pada AS pelanggan_ditangguhkan_pada, p.ditangguhkan_alasan AS pelanggan_ditangguhkan_alasan,
+      pk.nama AS paket_nama, cb.nama AS cabang_nama
     FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id LEFT JOIN pakets pk ON pk.id=s.paket_id LEFT JOIN cabangs cb ON cb.id=s.cabang_id
     WHERE s.id=$1 AND s.studio_id=$2${extra}`, params);
   if (!s) throw notFound('Sesi tidak ditemukan.');
@@ -500,6 +501,9 @@ function sesiRow(s) {
     minta_waktu_pada: s.minta_waktu_pada, catatan_umum: s.catatan_umum, editor_id: s.editor_id, editor_status: s.editor_status,
     dibuat_pada: s.dibuat_pada, jumlah_foto: s.jumlah_foto, jumlah_pilihan: s.jumlah_pilihan, cover: s.cover,
     pengingat_mati: s.pengingat_mati,
+    ditangguhkan: !!(s.ditangguhkan_pada || s.pelanggan_ditangguhkan_pada),
+    ditangguhkan_pada: s.ditangguhkan_pada, ditangguhkan_alasan: s.ditangguhkan_alasan,
+    pelanggan_ditangguhkan_pada: s.pelanggan_ditangguhkan_pada || null, pelanggan_ditangguhkan_alasan: s.pelanggan_ditangguhkan_alasan || null,
     cabang_id: s.cabang_id, cabang_nama: s.cabang_nama, harga_bertingkat: s.harga_bertingkat || [],
     hasil_link: s.hasil_link, hasil_dikirim_pada: s.hasil_dikirim_pada, terpilih_status: s.terpilih_status, terpilih_info: s.terpilih_info,
   };
@@ -517,11 +521,12 @@ r.get('/sesis', requireUser('sesi.lihat'), ah(async (req, res) => {
   if (st === 'waktu_habis') where += " AND s.status='terkirim' AND s.dikirim_otomatis";
   else if (st === 'aktif') where += " AND s.status IN ('siap','dibuka','memilih')";
   else if (st === 'masuk') where += " AND s.status='terkirim'";
+  else if (st === 'ditangguhkan') where += ' AND (s.ditangguhkan_pada IS NOT NULL OR p.ditangguhkan_pada IS NOT NULL)';
   else if (st === 'segera') where += " AND s.status IN ('siap','dibuka') AND s.tenggat_link < now() + interval '48 hours'";
   else if (st) { params.push(st); where += ` AND s.status=$${params.length}`; }
   const order = { tenggat: 's.tenggat_link ASC NULLS LAST', nama: 's.judul ASC' }[req.query.urut] || 's.dibuat_pada DESC';
   const lim = int(req.query.limit, { min: 1, max: 500, def: 200 });
-  const rows = await db.many(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, pk.nama AS paket_nama, cb.nama AS cabang_nama,
+  const rows = await db.many(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, p.ditangguhkan_pada AS pelanggan_ditangguhkan_pada, pk.nama AS paket_nama, cb.nama AS cabang_nama,
       (SELECT count(*)::int FROM fotos f WHERE f.sesi_id=s.id AND NOT f.dihapus) AS jumlah_foto,
       (SELECT count(*)::int FROM pilihans x WHERE x.sesi_id=s.id) AS jumlah_pilihan,
       (SELECT f.id FROM fotos f WHERE f.sesi_id=s.id AND NOT f.dihapus AND f.thumb_siap ORDER BY f.nomor LIMIT 1) AS cover_id
@@ -535,7 +540,7 @@ r.get('/sesis', requireUser('sesi.lihat'), ah(async (req, res) => {
     const fresh = await db.many('SELECT id, status, dikirim_otomatis, dikirim_pada FROM sesis WHERE id = ANY($1)', [stale.map((s) => s.id)]);
     fresh.forEach((f) => Object.assign(rows.find((x) => x.id === f.id), f));
   }
-  res.json(rows.map((s) => ({ ...sesiRow(s), cover: s.cover_id ? media.url(s.id, s.cover_id, 'thumb', s.media_versi) : null })));
+  res.json(rows.map((s) => ({ ...sesiRow(s), cover: s.cover_id ? media.url(s.id, s.cover_id, 'thumb', s.media_versi, true) : null })));
 }));
 
 function waText(studio, s, link, pin) {
@@ -645,7 +650,7 @@ r.get('/sesis/:id', requireUser('sesi.lihat'), ah(async (req, res) => {
   out.link = link; out.pin = pin;
   out.nomor_total = total;
   out.drive_folder_url = s.sumber === 'contoh' ? null : `https://drive.google.com/drive/folders/${s.drive_folder_id}${s.resource_key ? `?resourcekey=${s.resource_key}` : ''}`;
-  out.fotos = fotos.map((f) => ({ ...f, thumb: media.url(s.id, f.id, 'thumb', s.media_versi), preview: media.url(s.id, f.id, 'preview', s.media_versi) }));
+  out.fotos = fotos.map((f) => ({ ...f, thumb: media.url(s.id, f.id, 'thumb', s.media_versi, true), preview: media.url(s.id, f.id, 'preview', s.media_versi, true) }));
   out.events = events;
   out.followups = await db.many('SELECT id, kunci, target, kanal, status, pesan, dibuat_pada, dikirim_pada FROM followups WHERE sesi_id=$1 ORDER BY id DESC LIMIT 50', [s.id]);
   out.tagihan = tagihan;
@@ -1196,6 +1201,29 @@ r.put('/langganan/otomatis', requireUser('studio.edit'), ah(async (req, res) => 
   await db.q('UPDATE studios SET perpanjang_otomatis=$2 WHERE id=$1', [req.user.studio_id, bool(req.body.aktif)]);
   res.json({ ok: true });
 }));
+
+// ---------- Tangguhkan akses pelanggan (per galeri / per pelanggan) ----------
+async function tangguhSesi(req, aktif) {
+  const s = await loadSesi(req, req.params.id);
+  const alasan = aktif ? str(req.body.alasan, { max: 200, name: 'Alasan' }) || null : null;
+  await db.q('UPDATE sesis SET ditangguhkan_pada=$2, ditangguhkan_alasan=$3 WHERE id=$1', [s.id, aktif ? new Date() : null, alasan]);
+  await S.logEvent(null, s.id, aktif ? 'ditangguhkan' : 'dipulihkan', req.user.nama, alasan ? { alasan } : null);
+  await auditStudio(req, s.studio_id, aktif ? 'tangguhkan_galeri' : 'pulihkan_galeri', { sesi_id: s.id, judul: s.judul, alasan });
+}
+r.post('/sesis/:id/tangguhkan', requireUser('sesi.kelola'), ah(async (req, res) => { await tangguhSesi(req, true); res.json({ ok: true }); }));
+r.post('/sesis/:id/pulihkan', requireUser('sesi.kelola'), ah(async (req, res) => { await tangguhSesi(req, false); res.json({ ok: true }); }));
+async function tangguhPelanggan(req, aktif) {
+  // Lewat sesi milik pelanggan itu, agar cakupan studio/cabang/editor ikut dicek
+  const s = await loadSesi(req, req.params.id);
+  const alasan = aktif ? str(req.body.alasan, { max: 200, name: 'Alasan' }) || null : null;
+  await db.q('UPDATE pelanggans SET ditangguhkan_pada=$3, ditangguhkan_alasan=$4 WHERE id=$1 AND studio_id=$2', [s.pelanggan_id, s.studio_id, aktif ? new Date() : null, alasan]);
+  const sesis = await db.many('SELECT id FROM sesis WHERE pelanggan_id=$1', [s.pelanggan_id]);
+  for (const x of sesis) await S.logEvent(null, x.id, aktif ? 'pelanggan_ditangguhkan' : 'pelanggan_dipulihkan', req.user.nama, alasan ? { alasan } : null);
+  await auditStudio(req, s.studio_id, aktif ? 'tangguhkan_pelanggan' : 'pulihkan_pelanggan', { pelanggan: s.pelanggan_nama, galeri: sesis.length, alasan });
+  return sesis.length;
+}
+r.post('/sesis/:id/pelanggan/tangguhkan', requireUser('sesi.kelola'), ah(async (req, res) => res.json({ ok: true, galeri: await tangguhPelanggan(req, true) })));
+r.post('/sesis/:id/pelanggan/pulihkan', requireUser('sesi.kelola'), ah(async (req, res) => res.json({ ok: true, galeri: await tangguhPelanggan(req, false) })));
 
 // ---------- Otomasi follow-up & alert ----------
 r.get('/otomasi', requireUser('sesi.kelola'), ah(async (req, res) => {

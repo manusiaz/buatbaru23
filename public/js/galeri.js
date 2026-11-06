@@ -38,6 +38,7 @@
       if (info.perlu_pin) return renderPin();
       return loadState();
     }).catch(function (e) {
+      if (e.status === 423) return renderUnavailable(e);
       root.innerHTML = '';
       root.appendChild(h('div.center-page', h('div.gate', h('h1.title', 'Galeri tidak ditemukan'), h('p.muted', e.message))));
     });
@@ -49,8 +50,20 @@
       render(keepScroll);
     }).catch(function (e) {
       if (e.status === 401) { S.info.perlu_pin = true; return renderPin(); }
+      if (e.status === 423) return renderUnavailable(e);
       UI.toast(e.message, true);
     });
+  }
+
+  // Galeri ditangguhkan studio / studio tidak aktif
+  function renderUnavailable(e) {
+    clearInterval(S.timerT); closeLb && closeLb();
+    var d = e.data || {};
+    root.innerHTML = '';
+    root.appendChild(h('div.center-page', h('div.gate',
+      h('div.logo-mark', { style: { margin: '0 auto 12px', background: 'var(--s200)', color: 'var(--ink)' } }, ic('kunci')),
+      h('h1.title', 'Galeri tidak tersedia'), h('p.muted', e.message),
+      d.studio_wa ? h('a.btn.btn-primary', { href: 'https://wa.me/' + d.studio_wa + '?text=' + encodeURIComponent('Halo ' + (d.studio || '') + ', saya tidak bisa membuka galeri saya.'), target: '_blank', rel: 'noopener', style: { marginTop: '8px' } }, ic('wa'), 'Hubungi ' + (d.studio || 'studio')) : null)));
   }
 
   // ---------- PL1: PIN ----------
@@ -365,6 +378,7 @@
     }).catch(function (e) {
       saving(-1, true);
       f.dipilih = !want; redrawTile(n); updateCounts(); updateLb();
+      if (e.status === 423) return renderUnavailable(e);
       UI.toast(e.message, true);
       if (e.status === 409) loadState(true);
     });

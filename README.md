@@ -120,6 +120,11 @@ Audit keamanan independen dijalankan (exploit dicoba langsung). Semua temuan sud
 
 Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat API, CSRF, path traversal, tanda tangan URL media, SSRF.
 
+### Suspend / tangguhkan
+
+- **Studio** (super admin › Ubah › matikan "Studio aktif"): staf ter-logout & tidak bisa login, otomasi berhenti, dan **semua galeri pelanggannya offline** (pelanggan melihat "Galeri tidak tersedia" + tombol hubungi studio). Data tetap utuh; aktifkan lagi untuk memulihkan.
+- **Galeri** (detail sesi › Ubah pengaturan sesi › Tangguhkan galeri) atau **pelanggan** (Tangguhkan pelanggan = semua galerinya): PIN, galeri, pilih/kirim, bayar, dan gambar pratinjau publik ditolak; pengingat otomatis berhenti; alasan hanya terlihat tim; pilihan, catatan, dan tagihan tetap tersimpan. Tim tetap bisa melihat galeri di dasbor. Filter "Ditangguhkan" di daftar galeri. Pulihkan kapan saja; cookie pelanggan lama berlaku lagi. Semua tercatat di log keamanan.
+
 ### Otomasi follow-up & alert
 
 Menu **Otomasi & follow-up** (owner/admin). Mesin otomasi berjalan tiap 5 menit di server.
@@ -177,7 +182,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000 (NODE_ENV=development)
 ```
 
-Tes integrasi (43 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (46 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

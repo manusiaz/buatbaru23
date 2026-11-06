@@ -14,9 +14,10 @@ function expiry() {
 }
 function sign(sesiId, fotoId, kind, exp, v) { return hmac(`m:${sesiId}:${fotoId}:${kind}:${exp}:${v}`).slice(0, 32); }
 // v = media_versi sesi: dinaikkan saat PIN/link diganti sehingga URL lama langsung tidak berlaku
-function url(sesiId, fotoId, kind, v = 1) {
+function url(sesiId, fotoId, kind, v = 1, staf = false) {
   const exp = expiry();
-  return `/media/${sesiId}/${fotoId}/${kind}?e=${exp}&v=${v}&s=${sign(sesiId, fotoId, kind, exp, v)}`;
+  const st = staf ? 1 : 0;
+  return `/media/${sesiId}/${fotoId}/${kind}?e=${exp}&v=${v}${st ? '&staf=1' : ''}&s=${sign(sesiId, fotoId, kind, exp, `${v}:${st}`)}`;
 }
 
 const inflight = new Map();
@@ -29,9 +30,13 @@ async function handler(req, res) {
   const now = Math.floor(Date.now() / 1000);
   if (exp < now || exp > now + 3600 + WINDOW) return res.status(410).send('Link pratinjau kedaluwarsa, muat ulang halaman.');
   const v = parseInt(req.query.v, 10) || 1;
-  if (!safeEqual(sign(sesiId, fotoId, kind, exp, v), req.query.s)) return res.status(403).end();
-  const cur = await db.one('SELECT media_versi FROM sesis WHERE id=$1', [sesiId]).catch(() => null);
+  const stf = req.query.staf === '1' ? 1 : 0; // ditandatangani: pelanggan tidak bisa memalsukan URL staf
+  if (!safeEqual(sign(sesiId, fotoId, kind, exp, `${v}:${stf}`), req.query.s)) return res.status(403).end();
+  const cur = await db.one(`SELECT s.media_versi, (st.aktif AND s.ditangguhkan_pada IS NULL AND p.ditangguhkan_pada IS NULL) AS tersedia
+    FROM sesis s JOIN studios st ON st.id=s.studio_id JOIN pelanggans p ON p.id=s.pelanggan_id WHERE s.id=$1`, [sesiId]).catch(() => null);
   if (!cur || cur.media_versi !== v) return res.status(410).send('Link pratinjau sudah tidak berlaku.');
+  // Pratinjau staf tetap boleh (URL dibuat di dasbor), tapi galeri tertangguh tidak melayani gambar ke publik
+  if (!cur.tersedia && !stf) return res.status(423).send('Galeri sedang tidak tersedia.');
   const p = images.filePath(sesiId, fotoId, kind);
   if (!fs.existsSync(p)) {
     const key = `${fotoId}:${kind}`;

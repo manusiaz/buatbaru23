@@ -179,7 +179,7 @@
       h('td', h('div.sesi-cell', cover(s, i), h('div', h('b', s.judul), h('span.small.muted', [s.jenis, s.pelanggan_nama !== s.judul ? s.pelanggan_nama : null].filter(Boolean).join(' · '))))),
       h('td.mono', String(s.jumlah_foto)),
       h('td', h('div.mono.small', s.jumlah_pilihan + ' / ' + s.kuota), h('div.progress', h('i', { style: { width: pct + '%' } }))),
-      h('td', UI.statusBadge(s.status), s.minta_waktu_pada && s.status === 'memilih' ? h('div.small', { style: { color: 'var(--scarlet)', fontWeight: 700 } }, 'Minta waktu') : null),
+      h('td', s.ditangguhkan ? h('span.badge.st-kedaluwarsa', 'Ditangguhkan') : UI.statusBadge(s.status), s.minta_waktu_pada && s.status === 'memilih' ? h('div.small', { style: { color: 'var(--scarlet)', fontWeight: 700 } }, 'Minta waktu') : null),
       h('td.small.muted', deadlineText(s)));
   }
 
@@ -188,7 +188,7 @@
     var q = qs();
     var st = q.status || '';
     main.appendChild(head('Galeri', 'Semua sesi foto', can('sesi.kelola') ? [h('a.btn.btn-secondary', { href: '#/massal' }, ic('unduh'), 'Buat massal (CSV)'), h('a.btn.btn-primary', { href: '#/galeri/baru' }, ic('tambah'), 'Buat galeri')] : null));
-    var tabs = [['', 'Semua'], ['aktif', 'Aktif'], ['memilih', 'Sedang memilih'], ['segera', 'Segera berakhir'], ['masuk', 'Pilihan masuk'], ['waktu_habis', 'Waktu habis'], ['selesai', 'Selesai'], ['kedaluwarsa', 'Kedaluwarsa'], ['menyinkron', 'Menyinkron']];
+    var tabs = [['', 'Semua'], ['aktif', 'Aktif'], ['memilih', 'Sedang memilih'], ['segera', 'Segera berakhir'], ['masuk', 'Pilihan masuk'], ['waktu_habis', 'Waktu habis'], ['selesai', 'Selesai'], ['kedaluwarsa', 'Kedaluwarsa'], ['ditangguhkan', 'Ditangguhkan'], ['menyinkron', 'Menyinkron']];
     var seg = h('div.seg', tabs.map(function (t) { return h('a', { href: '#/galeri' + (t[0] ? '?status=' + t[0] : ''), class: st === t[0] ? 'on' : '' }, t[1]); }));
     var search = h('input.input.search', { type: 'search', placeholder: 'Cari galeri / pelanggan / no. WA', value: q.q || '', style: { width: '260px' }, 'aria-label': 'Cari galeri' });
     var urut = h('select.select', { style: { width: 'auto', borderRadius: '99px' }, 'aria-label': 'Urutkan' }, h('option', { value: '' }, 'Terbaru'), h('option', { value: 'tenggat', selected: q.urut === 'tenggat' }, 'Segera berakhir'), h('option', { value: 'nama', selected: q.urut === 'nama' }, 'Nama A–Z'));
@@ -206,7 +206,7 @@
         if (!rows.length) { listBox.appendChild(h('div.card.empty', h('p.title', 'Belum ada galeri di sini'), can('sesi.kelola') ? h('a.btn.btn-primary', { href: '#/galeri/baru' }, 'Buat galeri') : null)); return; }
         listBox.appendChild(h('div.cards', rows.map(function (s, i) {
           return h('a.g-card', { href: '#/galeri/' + s.id },
-            h('div.img', { style: { background: s.cover ? null : 'linear-gradient(' + TONE[s.id % TONE.length] + ' 55%, var(--deep-teal) 55%)' } }, s.cover ? h('img', { src: s.cover, alt: '', loading: 'lazy' }) : null, UI.statusBadge(s.status)),
+            h('div.img', { style: { background: s.cover ? null : 'linear-gradient(' + TONE[s.id % TONE.length] + ' 55%, var(--deep-teal) 55%)' } }, s.cover ? h('img', { src: s.cover, alt: '', loading: 'lazy' }) : null, s.ditangguhkan ? h('span.badge.st-kedaluwarsa', ic('kunci'), 'Ditangguhkan') : UI.statusBadge(s.status)),
             h('div.body', h('b', s.judul), h('span.small.muted', [s.cabang_nama, s.jenis, s.jumlah_foto + ' foto', s.pelanggan_wa ? '+' + s.pelanggan_wa : null].filter(Boolean).join(' · ')),
               h('div.row', { style: { justifyContent: 'space-between' } }, h('span.mono.small', s.jumlah_pilihan + '/' + s.kuota + ' dipilih'), h('span.small.muted', deadlineText(s))),
               h('div.progress', h('i', { style: { width: Math.min(100, s.kuota ? s.jumlah_pilihan / s.kuota * 100 : 0) + '%' } }))));
@@ -437,6 +437,17 @@
       main.appendChild(head(s.judul, [s.jenis, s.tanggal_sesi ? UI.fmtDate(s.tanggal_sesi + 'T12:00:00Z', tz()) : null, s.paket_nama ? 'Paket ' + s.paket_nama : null].filter(Boolean).join(' · '), right,
         h('div.crumb', h('a', { href: '#/galeri' }, 'Galeri'), ' / ', s.judul, ' ', UI.statusBadge(s.status))));
 
+      // Penangguhan akses pelanggan
+      if (s.ditangguhkan) {
+        var byPel = !!s.pelanggan_ditangguhkan_pada;
+        main.appendChild(h('div.alert.err', { style: { marginBottom: '16px' } }, h('div.alert-row',
+          h('div', h('b', byPel ? 'Pelanggan ini ditangguhkan' : 'Akses galeri ditangguhkan'), ' · sejak ' + UI.fmtDateTime(byPel ? s.pelanggan_ditangguhkan_pada : s.ditangguhkan_pada, tz()),
+            (byPel ? s.pelanggan_ditangguhkan_alasan : s.ditangguhkan_alasan) ? h('div.small', 'Alasan: ' + (byPel ? s.pelanggan_ditangguhkan_alasan : s.ditangguhkan_alasan)) : null,
+            h('div.small', byPel ? 'Semua galeri pelanggan ini tidak bisa dibuka. Data & pilihan tetap utuh.' : 'Pelanggan tidak bisa membuka galeri ini. Data & pilihan tetap utuh.')),
+          can('sesi.kelola') ? h('div.row',
+            s.ditangguhkan_pada ? h('button.btn.btn-sm.btn-primary', { type: 'button', onclick: function () { act('/pulihkan', {}, 'Akses galeri dipulihkan'); } }, 'Pulihkan galeri') : null,
+            byPel ? h('button.btn.btn-sm.btn-primary', { type: 'button', onclick: function () { act('/pelanggan/pulihkan', {}, 'Pelanggan dipulihkan'); } }, 'Pulihkan pelanggan') : null) : null)));
+      }
       // Alert minta waktu
       if (s.minta_waktu_pada && s.status_db === 'memilih' && can('sesi.kelola')) {
         main.appendChild(h('div.alert', { style: { marginBottom: '16px' } }, h('div.alert-row', h('div', h('b', 'Pelanggan minta tambah waktu'), ' · ' + UI.rel(s.minta_waktu_pada)),
@@ -457,6 +468,16 @@
         pollT = setTimeout(load, 15000);
       }
 
+      function tangguhkan(perPelanggan) {
+        var alasan = h('input.input', { maxlength: 200, placeholder: 'Alasan (opsional, hanya terlihat oleh tim)' });
+        UI.modal({ title: perPelanggan ? 'Tangguhkan pelanggan ' + s.pelanggan_nama + '?' : 'Tangguhkan akses galeri ini?',
+          body: h('div.stack', { style: { gap: '10px' } }, h('p.muted', perPelanggan
+            ? 'Semua galeri milik pelanggan ini tidak bisa dibuka sampai dipulihkan. Pengingat otomatis berhenti. Pilihan, catatan, dan tagihan tetap tersimpan.'
+            : 'Pelanggan tidak bisa membuka galeri ini sampai dipulihkan. Pengingat otomatis berhenti. Pilihan, catatan, dan tagihan tetap tersimpan.'), alasan),
+          actions: [{ label: 'Batal' }, { label: 'Tangguhkan', cls: 'btn-danger', onClick: function (c) {
+            c(); act(perPelanggan ? '/pelanggan/tangguhkan' : '/tangguhkan', { alasan: alasan.value }, perPelanggan ? 'Pelanggan ditangguhkan' : 'Galeri ditangguhkan');
+          } }] });
+      }
       var top = h('div.detail-top');
       if (s.link) {
         top.appendChild(h('section.panel-teal.link-panel',
@@ -530,7 +551,7 @@
       leftCol.appendChild(hasilCard(s));
       if (can('sesi.kelola')) leftCol.appendChild(pengingatCard(s));
       if (can('sesi.kelola') && s.sumber === 'service_account') leftCol.appendChild(terpilihCard(s, load));
-      if (can('sesi.kelola')) leftCol.appendChild(settingsCard(s));
+      if (can('sesi.kelola')) leftCol.appendChild(settingsCard(s, { tangguhkan: tangguhkan }));
       bottom.appendChild(leftCol);
       bottom.appendChild(h('section.card', h('h2.title', 'Log aktivitas'), h('ul.log', s.events.map(function (e) {
         return h('li', h('time', UI.fmtDate(e.waktu, tz(), { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })), h('div', h('b', eventLabel(e)), ' · ', h('span.muted', e.aktor), e.detail ? h('div.small.muted', eventDetail(e)) : null));
@@ -571,7 +592,7 @@
   var EVENT = { dibuat: 'Galeri dibuat', sinkron: 'Sinkron Drive', sinkron_gagal: 'Sinkron gagal', dibuka: 'Pelanggan membuka galeri', mulai: 'Mulai pilih', pilih: 'Pilih', batal: 'Batal pilih',
     kirim: 'Pilihan dikirim', waktu_habis: 'Waktu habis · terkirim otomatis', perpanjang: 'Waktu ditambah', perpanjang_link: 'Tenggat link diperpanjang', buka_ulang: 'Dibuka ulang',
     reset_timer: 'Timer di-reset', minta_waktu: 'Minta tambah waktu', tolak_minta_waktu: 'Permintaan waktu ditutup', kedaluwarsa: 'Kedaluwarsa', bayar: 'Status bayar', editor: 'Status editor',
-    ubah: 'Pengaturan sesi diubah', followup: 'Follow-up', pengingat: 'Pengingat otomatis', ganti_link: 'Link diganti', ganti_pin: 'PIN diganti', pin_terkunci: 'PIN terkunci 15 menit', link_dikirim: 'Link dikirim via WhatsApp' };
+    ubah: 'Pengaturan sesi diubah', ditangguhkan: 'Galeri ditangguhkan', dipulihkan: 'Galeri dipulihkan', pelanggan_ditangguhkan: 'Pelanggan ditangguhkan', pelanggan_dipulihkan: 'Pelanggan dipulihkan', followup: 'Follow-up', pengingat: 'Pengingat otomatis', ganti_link: 'Link diganti', ganti_pin: 'PIN diganti', pin_terkunci: 'PIN terkunci 15 menit', link_dikirim: 'Link dikirim via WhatsApp' };
   function eventLabel(e) { return EVENT[e.jenis] || e.jenis; }
   function eventDetail(e) {
     var d = e.detail || {};
@@ -646,7 +667,7 @@
     } }, 'Simpan')));
     return card;
   }
-  function settingsCard(s) {
+  function settingsCard(s, opts) {
     var f = {};
     function num(k, label, hint) { f[k] = h('input.input', { type: 'number', min: 0, value: s[k] }); return h('label.field', h('span', label), f[k], hint ? h('span.hint', hint) : null); }
     f.judul = h('input.input', { value: s.judul, maxlength: 120 });
@@ -660,7 +681,10 @@
           h('label.field', h('span', 'Harga bertingkat'), f.harga_bertingkat = h('input.input', { value: tiersText(s.harga_bertingkat), placeholder: '5=100000, 10=180000' }))),
         h('div', h('div.toggle-row', h('b', 'Tampilkan nama file ke pelanggan'), h('label.switch', tn, h('span'))), h('div.toggle-row', h('b', 'Izinkan catatan per foto'), h('label.switch', tc, h('span')))),
         h('div.row', { style: { justifyContent: 'space-between' } },
-          can('sesi.hapus') ? h('button.btn.btn-danger.btn-sm', { type: 'button', onclick: hapus }, 'Hapus galeri & data pelanggan') : h('span'),
+          h('div.row',
+            can('sesi.hapus') ? h('button.btn.btn-danger.btn-sm', { type: 'button', onclick: hapus }, 'Hapus galeri & data pelanggan') : null,
+            !s.ditangguhkan_pada ? h('button.btn.btn-secondary.btn-sm', { type: 'button', onclick: function () { opts.tangguhkan(false); } }, ic('kunci'), 'Tangguhkan galeri') : null,
+            !s.pelanggan_ditangguhkan_pada ? h('button.btn.btn-secondary.btn-sm', { type: 'button', onclick: function () { opts.tangguhkan(true); } }, ic('kunci'), 'Tangguhkan pelanggan') : null),
           h('button.btn.btn-primary', { type: 'button', onclick: simpan }, 'Simpan'))));
     function simpan() {
       var b = { tampil_nama_file: tn.checked, izin_catatan: tc.checked };
@@ -1503,7 +1527,7 @@
   }
   var AUDIT = { login: 'Masuk', login_gagal: 'Gagal masuk', logout: 'Keluar', daftar_studio: 'Studio didaftarkan', gabung_tim: 'Bergabung ke tim', undang_tim: 'Undang anggota',
     batal_undangan: 'Batalkan undangan', ubah_anggota: 'Ubah anggota', ubah_logo: 'Ganti logo', ubah_token_wa: 'Ganti token WhatsApp', ubah_pengaturan: 'Ubah pengaturan',
-    hapus_galeri: 'Hapus galeri', ganti_pin: 'Ganti PIN galeri', ganti_link: 'Ganti link galeri', ekspor: 'Ekspor nama file', keluarkan_perangkat: 'Keluarkan perangkat' };
+    hapus_galeri: 'Hapus galeri', tangguhkan_galeri: 'Tangguhkan galeri', pulihkan_galeri: 'Pulihkan galeri', tangguhkan_pelanggan: 'Tangguhkan pelanggan', pulihkan_pelanggan: 'Pulihkan pelanggan', ganti_pin: 'Ganti PIN galeri', ganti_link: 'Ganti link galeri', ekspor: 'Ekspor nama file', keluarkan_perangkat: 'Keluarkan perangkat' };
   function auditSection() {
     var list = h('ul.log', h('li.muted', 'Memuat…'));
     api('GET', '/api/audit-keamanan').then(function (rows) {

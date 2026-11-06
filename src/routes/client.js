@@ -20,11 +20,24 @@ const KUNCI_MENIT = 15;
 
 function cookieName(sesiId) { return `gs_c${sesiId}`; }
 
+// Gerbang akses: studio ditangguhkan platform, galeri ditangguhkan, atau pelanggan ditangguhkan → 423.
+// Data & pilihan tetap utuh; akses pulih begitu penangguhan dicabut.
+async function checkAvailable(sesi) {
+  const r = await db.one(`SELECT st.aktif AS studio_aktif, st.nama AS studio_nama, st.no_wa AS studio_wa,
+      p.ditangguhkan_pada AS pel_tangguh FROM studios st JOIN pelanggans p ON p.id=$2 WHERE st.id=$1`, [sesi.studio_id, sesi.pelanggan_id]);
+  if (!r) return;
+  const kontak = { studio: r.studio_nama, studio_wa: r.studio_wa, ditangguhkan: true };
+  if (!r.studio_aktif) throw new HttpError(423, 'Galeri ini sedang tidak tersedia. Silakan hubungi studio.', kontak);
+  if (sesi.ditangguhkan_pada || r.pel_tangguh) throw new HttpError(423, 'Akses galeri ini sedang ditangguhkan oleh studio. Silakan hubungi studio.', kontak);
+}
+
 async function findSesi(token) {
   if (!/^[A-Za-z0-9_-]{16,64}$/.test(token || '')) return null;
   const s = await db.one('SELECT id FROM sesis WHERE token_hash=$1', [sha256(token)]);
   if (!s) return null;
-  return S.enforce(s.id);
+  const sesi = await S.enforce(s.id);
+  await checkAvailable(sesi);
+  return sesi;
 }
 
 async function context(req) {
