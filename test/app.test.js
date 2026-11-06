@@ -1019,3 +1019,46 @@ test('traktir kopi: bayar Rp 5.000 dari saldo = +1 bulan paket Gratis, bisa bert
     assert.equal((await a.call('POST', '/api/langganan/perpanjang-coba')).status, 400);
   } finally { config.billingEnabled = false; }
 });
+
+// ======================= Pengaturan langganan dari halaman admin =======================
+test('super admin mengatur langganan, masa coba, traktir kopi & harga dari halaman admin (tanpa .env)', async () => {
+  const sa = await owner();
+  const me = (await sa.call('GET', '/api/me')).body;
+  await db.q('UPDATE users SET superadmin=true WHERE id=$1', [me.user.id]);
+  const biasa = await owner();
+  try {
+    assert.equal((await biasa.call('PUT', '/api/admin/platform', { kopi_harga: 1 })).status, 403, 'bukan super admin');
+    assert.equal((await sa.call('PUT', '/api/admin/platform', { kopi_harga: -5 })).status, 400);
+    assert.equal((await sa.call('PUT', '/api/admin/platform', { gratis_hari: 'abc' })).status, 400);
+    assert.equal((await sa.call('PUT', '/api/admin/platform', { topup_nominal: '5' })).status, 400);
+    assert.equal((await sa.call('PUT', '/api/admin/platform', { ngawur: 1 })).status, 400);
+    const r = await sa.call('PUT', '/api/admin/platform', { billing_aktif: true, gratis_hari: 7, kopi_harga: '10.000', kopi_hari: 60, starter_harga: 99000, topup_nominal: '10000, 5000, 50000' });
+    assert.equal(r.status, 200);
+    assert.equal(config.billingEnabled, true);
+    const L = (await biasa.call('GET', '/api/langganan')).body;
+    assert.equal(L.trial_hari, 7);
+    assert.equal(L.perpanjang_harga, 10000);
+    assert.equal(L.perpanjang_hari, 60);
+    assert.equal(L.katalog.find((p) => p.kode === 'starter').harga, 99000);
+    assert.ok(Math.abs(new Date(L.trial_sampai) - Date.now() - 7 * 86400000) < 60000, 'masa coba studio baru ikut 7 hari');
+    assert.deepEqual(L.nominal, [5000, 10000, 50000]);
+    const pub = (await new Client().call('GET', '/api/config')).body.harga;
+    assert.equal(pub.paket.starter.harga, 99000);
+    // Traktir kopi memakai harga & lama yang baru
+    const id = await studioOf(biasa);
+    await db.q("UPDATE studios SET saldo=10000, dibuat_pada=now() - interval '10 days' WHERE id=$1", [id]);
+    const k = (await biasa.call('POST', '/api/langganan/perpanjang-coba')).body;
+    assert.equal(k.saldo, 0);
+    assert.ok(Math.abs(new Date(k.trial_sampai) - Date.now() - 60 * 86400000) < 60000);
+    const aud = (await sa.call('GET', '/api/admin/audit')).body.find((a) => a.aksi === 'ubah_pengaturan_platform');
+    assert.ok(aud && JSON.stringify(aud.detail).includes('kopi_harga'));
+    const g = (await sa.call('GET', '/api/admin/platform')).body;
+    assert.equal(g.find((x) => x.grup === 'gratis').fields.find((f) => f.k === 'kopi_harga').diatur, true);
+  } finally {
+    // Kembali ke bawaan
+    await sa.call('PUT', '/api/admin/platform', { billing_aktif: null, gratis_hari: null, kopi_harga: null, kopi_hari: null, starter_harga: null, topup_nominal: null });
+  }
+  assert.equal(config.billingEnabled, false);
+  assert.equal(config.perpanjangHarga, 5000);
+  assert.equal(config.gratisHari, 3);
+});

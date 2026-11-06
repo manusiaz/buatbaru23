@@ -1227,6 +1227,7 @@
           h('div.stat', h('span.label', 'Top up menunggu'), h('div.v', String(d.topup_menunggu)), h('div.small.muted', F.rupiah(Number(d.topup_30h)) + ' disetujui 30 hari')),
           h('div.stat', h('span.label', 'Pendapatan paket 30 hari'), h('div.v', { style: { fontSize: '24px' } }, F.rupiah(Number(d.pendapatan_30h))))));
         box.appendChild(topupPanel());
+        box.appendChild(platformPanel());
         box.appendChild(qrisPanel());
         box.appendChild(h('section.card', h('div.filters', h('h2.title', 'Tenant'), q), h('div.table-wrap', h('table.tbl',
           h('thead', h('tr', h('th', 'Studio'), h('th', 'Owner'), h('th', 'Paket'), h('th', 'Sampai'), h('th', 'Saldo'), h('th', 'Sesi bln ini'), h('th', 'Status'), h('th', ''))),
@@ -1282,6 +1283,44 @@
                   } }] });
                 } }, 'Tolak'))));
           })))));
+      }).catch(err);
+      return sec;
+    }
+    // Pengaturan langganan, masa coba, traktir kopi & harga paket
+    function platformPanel() {
+      var sec = h('section.card', h('h2.title', 'Pengaturan langganan & harga'),
+        h('p.small.muted', { style: { marginTop: '-8px' } }, 'Berlaku langsung untuk semua studio tanpa restart. Kosongkan kolom untuk kembali ke nilai bawaan. Semua perubahan tercatat di audit.'));
+      var inputs = {};
+      api('GET', '/api/admin/platform').then(function (groups) {
+        groups.forEach(function (g) {
+          sec.appendChild(h('div.label', { style: { margin: '18px 0 4px' } }, g.nama));
+          g.fields.forEach(function (f) {
+            var inp;
+            if (f.jenis === 'bool') inp = h('input', { type: 'checkbox', checked: f.nilai });
+            else inp = h('input.input', { value: f.jenis === 'list' ? f.nilai.join(', ') : f.nilai, inputmode: 'numeric', style: { width: f.jenis === 'list' ? '100%' : '170px', maxWidth: '100%' } });
+            inputs[f.k] = { f: f, inp: inp };
+            var bawaan = f.jenis === 'bool' ? (f.bawaan ? 'aktif' : 'mati') : f.jenis === 'list' ? f.bawaan.join(', ') : f.bawaan;
+            var meta = [f.diatur ? 'Diatur ' + UI.rel(f.diubah_pada) + ' oleh ' + f.diubah_oleh : 'Memakai nilai bawaan', 'bawaan: ' + bawaan].join(' · ');
+            sec.appendChild(h('div.toggle-row', { style: { alignItems: f.jenis === 'list' ? 'stretch' : 'center', flexDirection: f.jenis === 'list' ? 'column' : 'row' } },
+              h('div', { style: { flex: 1, minWidth: 0 } }, h('b', f.label), f.hint ? h('div.small.muted', f.hint) : null, h('div.small.muted', meta)),
+              f.jenis === 'bool' ? h('label.switch', inp, h('span')) : h('div.row', { style: { flexWrap: 'nowrap', gap: '6px' } }, inp, f.satuan ? h('span.small.muted', { style: { whiteSpace: 'nowrap' } }, f.satuan) : null)));
+          });
+        });
+        sec.appendChild(h('div.row', { style: { justifyContent: 'flex-end', marginTop: '14px' } }, h('button.btn.btn-primary', { type: 'button', onclick: function () {
+          var body = {}, ringkas = [];
+          Object.keys(inputs).forEach(function (k) {
+            var x = inputs[k], f = x.f;
+            var val = f.jenis === 'bool' ? x.inp.checked : x.inp.value.trim();
+            var cur = f.jenis === 'list' ? f.nilai.join(', ') : f.nilai;
+            if (f.jenis !== 'bool' && val === '') { if (f.diatur) { body[k] = null; ringkas.push(f.label + ' → bawaan'); } return; }
+            if (String(val) === String(cur)) return;
+            body[k] = val; ringkas.push(f.label + ' → ' + (f.jenis === 'bool' ? (val ? 'aktif' : 'mati') : val));
+          });
+          if (!ringkas.length) { UI.toast('Tidak ada perubahan'); return; }
+          UI.confirm('Simpan perubahan?', ringkas.join(' · '), 'Simpan').then(function (ok) {
+            if (ok) api('PUT', '/api/admin/platform', body).then(function () { UI.toast('Pengaturan platform disimpan'); refreshMe(); load(); }).catch(err);
+          });
+        } }, 'Simpan pengaturan')));
       }).catch(err);
       return sec;
     }

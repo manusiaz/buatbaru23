@@ -21,6 +21,7 @@ const wa = require('../wa');
 const payment = require('../payment');
 const saldo = require('../saldo');
 const otomasi = require('../otomasi');
+const platform = require('../platform');
 
 const r = express.Router();
 
@@ -58,6 +59,8 @@ r.get('/config', (req, res) => {
     serviceAccountEmail: drive.serviceAccountEmail(),
     demoSource: config.allowDemoSource,
     passwordLogin: config.passwordLogin,
+    harga: { billing: config.billingEnabled, gratis_hari: config.gratisHari, kopi_harga: config.perpanjangHarga, kopi_hari: config.perpanjangHari,
+      paket: Object.fromEntries(Object.entries(plans.PLANS).map(([k, p]) => [k, { harga: p.harga, sesi: p.sesi === Infinity ? null : p.sesi, pengguna: p.pengguna === Infinity ? null : p.pengguna }])) },
     registrasi: config.allowRegistration,
     formats: F.FORMATS,
   });
@@ -1348,6 +1351,14 @@ r.put('/admin/qris', requireSuperadmin(), ah(async (req, res) => {
   await audit(req, 'ubah_qris', null, { gambar: !!req.body.data_url });
   res.json({ ok: true });
 }));
+// ---------- Pengaturan langganan & harga (super admin) ----------
+r.get('/admin/platform', requireSuperadmin(), ah(async (req, res) => res.json(platform.summary())));
+r.put('/admin/platform', requireSuperadmin(), limit('platform_cfg', 60, 3600, (req) => `${req.user.id}`), ah(async (req, res) => {
+  const out = await platform.save(req.body, req.user.email);
+  await audit(req, 'ubah_pengaturan_platform', null, { perubahan: out, ip: req.ip });
+  res.json({ ok: true, grup: platform.summary() });
+}));
+
 // ---------- Integrasi & kunci API (super admin + sudo mode) ----------
 // Konfirmasi identitas ulang: login Google lagi (atau kata sandi bila mode sandi aktif)
 r.post('/admin/sudo', requireSuperadmin(), limit('sudo', 10, 15 * 60, (req) => `${req.user.id}`), ah(async (req, res) => {

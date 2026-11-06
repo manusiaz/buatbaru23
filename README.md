@@ -120,9 +120,13 @@ Audit keamanan independen dijalankan (exploit dicoba langsung). Semua temuan sud
 
 Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat API, CSRF, path traversal, tanda tangan URL media, SSRF.
 
+### Pengaturan langganan & harga (halaman Super admin)
+
+Semua angka bisnis diatur dari **Super admin › Pengaturan langganan & harga**, tanpa edit `.env` atau restart: langganan aktif/mati, masa coba gratis (hari), harga & lama traktir kopi, kuota galeri & pengguna paket Gratis, nominal top up QRIS, serta harga/kuota/pengguna paket Starter & Pro. Kosongkan kolom untuk kembali ke bawaan. Setiap perubahan tercatat di audit (siapa, kapan, nilai lama→baru). Halaman jualan otomatis menampilkan angka terbaru. Nilai `.env` (`BILLING_ENABLED`, `GRATIS_HARI`, `GRATIS_PERPANJANG_HARGA`, `GRATIS_PERPANJANG_HARI`, `TOPUP_NOMINAL`) hanya dipakai sebagai bawaan.
+
 ### Masa coba gratis (per studio)
 
-Berlaku bila `BILLING_ENABLED=true`. Setiap studio dapat **coba gratis 3 hari** (`GRATIS_HARI`) sejak studio itu mendaftar.
+Berlaku bila langganan aktif (Super admin › Pengaturan langganan & harga). Setiap studio dapat **coba gratis 3 hari** (`GRATIS_HARI`) sejak studio itu mendaftar.
 - Setelah habis: tidak bisa membuat galeri baru (termasuk CSV massal) atau mengundang anggota. Galeri yang sudah dikirim tetap bisa dibuka pelanggan sampai tenggatnya. Banner hitung mundur tampil di semua halaman dasbor.
 - **Traktir kopi ☕ Rp 5.000 = +1 bulan paket Gratis** (`GRATIS_PERPANJANG_HARGA`, `GRATIS_PERPANJANG_HARI`). Khusus paket Gratis, terpisah dari paket berbayar (Starter/Pro/Bisnis), bukan langganan dan tidak terpotong otomatis. Dibayar dari saldo; bisa diulang dan bertumpuk; bila saldo kurang, studio langsung ditawari top up Rp 5.000 via QRIS.
 - Atau pilih paket berbayar (dibayar dari saldo). Paket berbayar yang habis kembali ke kondisi coba-habis.
@@ -190,7 +194,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000 (NODE_ENV=development)
 ```
 
-Tes integrasi (48 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (49 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

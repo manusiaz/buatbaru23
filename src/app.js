@@ -51,7 +51,7 @@ function createApp() {
   // Muat setting integrasi dari database sekali sebelum request pertama
   let integrasiSiap = null;
   app.use((req, res, next) => {
-    if (!integrasiSiap) integrasiSiap = require('./integrasi').reload().catch((e) => { integrasiSiap = null; throw e; });
+    if (!integrasiSiap) integrasiSiap = Promise.all([require('./integrasi').reload(), require('./platform').reload()]).catch((e) => { integrasiSiap = null; throw e; });
     integrasiSiap.then(() => next(), next);
   });
   app.use('/api/webhooks', require('./routes/webhooks'));

@@ -11,6 +11,9 @@ async function main() {
   const integrasi = require('./integrasi');
   await integrasi.reload();
   integrasi.start();
+  const platform = require('./platform');
+  await platform.reload();
+  platform.start();
   await sesi.compensateDowntime();
   await sesi.heartbeat();
   sesi.startBackground();
