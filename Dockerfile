@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim
+FROM node:25-bookworm-slim
 ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/data
