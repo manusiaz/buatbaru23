@@ -10,12 +10,12 @@ function mailer() {
 }
 
 // Notifikasi in-app untuk studio + email ke owner/admin bila SMTP dikonfigurasi (F-40).
-async function notify(studioId, sesiId, jenis, pesan, { email = true } = {}) {
+async function notify(studioId, sesiId, jenis, pesan, { email = true, userIds = null } = {}) {
   await db.q('INSERT INTO notifikasis(studio_id, sesi_id, jenis, pesan) VALUES ($1,$2,$3,$4)', [studioId, sesiId, jenis, pesan]);
   const m = mailer();
   if (!m || !email) return;
   try {
-    const to = await db.many("SELECT email FROM users WHERE studio_id=$1 AND aktif AND peran IN ('owner','admin')", [studioId]);
+    const to = await db.many(`SELECT email FROM users WHERE studio_id=$1 AND aktif AND (peran IN ('owner','admin') OR id = ANY($2::bigint[]))`, [studioId, userIds || []]);
     if (!to.length) return;
     const link = sesiId ? `${config.baseUrl}/app#/galeri/${sesiId}` : `${config.baseUrl}/app`;
     await m.sendMail({

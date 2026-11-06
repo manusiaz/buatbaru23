@@ -79,6 +79,7 @@ function infoOut(ctx) {
     hasil_link: (ctx.authed || ctx.staff) && ['terkirim', 'selesai'].includes(s.status) ? s.hasil_link : null,
     tagihan: (ctx.authed || ctx.staff) && ctx.tagihan ? { jumlah_foto: ctx.tagihan.jumlah_foto, total: Number(ctx.tagihan.total_rupiah), status_bayar: ctx.tagihan.status_bayar, metode: ctx.tagihan.metode } : null,
     bayar_online: payment.enabled() && plans.has(ctx.studio, 'bayar_online'),
+    pengingat_mati: s.pengingat_mati,
     staff_url: ctx.staff ? `/app#/galeri/${s.id}` : null,
     berakhir_pada: s.berakhir_pada, mulai_pilih_pada: s.mulai_pilih_pada, dikirim_pada: s.dikirim_pada,
     minta_waktu_pada: s.minta_waktu_pada, catatan_umum: ctx.authed || ctx.staff ? s.catatan_umum : null,
@@ -294,6 +295,16 @@ r.post('/minta-waktu', limit('minta', 10, 60 * 60), ah(async (req, res) => {
   await db.q('UPDATE sesis SET minta_waktu_pada=now() WHERE id=$1', [s.id]);
   await S.logEvent(null, s.id, 'minta_waktu', 'pelanggan', { fase: phase(s) });
   await notify(s.studio_id, s.id, 'minta_waktu', `${s.judul} minta tambah waktu`);
+  res.json({ ok: true });
+}));
+
+// Pelanggan menghentikan pengingat otomatis
+r.post('/pengingat', ah(async (req, res) => {
+  const ctx = await context(req);
+  if (!ctx.authed) throw new HttpError(401, 'Masukkan PIN dulu.');
+  const mati = req.body.aktif === false || req.body.aktif === 'false';
+  await db.q('UPDATE sesis SET pengingat_mati=$2 WHERE id=$1', [ctx.sesi.id, mati]);
+  await S.logEvent(null, ctx.sesi.id, 'pengingat', 'pelanggan', { aktif: !mati });
   res.json({ ok: true });
 }));
 

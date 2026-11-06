@@ -82,7 +82,12 @@
 
   function legal() {
     return h('div.legal', 'Foto ini milik ', S.info ? S.info.studio.nama : 'studio', '. Pratinjau ber-watermark, bukan file akhir. ', h('a', { href: '/privasi', target: '_blank' }, 'Kebijakan privasi'),
-      S.info && S.info.label_produk ? h('div', { style: { marginTop: '6px' } }, 'Dibuat dengan ', h('a', { href: '/', target: '_blank' }, 'Galeri Seleksi')) : null);
+      S.info && S.info.label_produk ? h('div', { style: { marginTop: '6px' } }, 'Dibuat dengan ', h('a', { href: '/', target: '_blank' }, 'Galeri Seleksi')) : null,
+      S.state && !S.state.staff && !S.state.perlu_pin ? h('div', { style: { marginTop: '6px' } }, h('a', { href: '#', onclick: function (e) {
+        e.preventDefault();
+        var aktif = !!S.state.pengingat_mati;
+        api('POST', '/pengingat', { aktif: aktif }).then(function () { S.state.pengingat_mati = !aktif; UI.toast(aktif ? 'Pengingat dinyalakan lagi' : 'Kamu tidak akan menerima pengingat lagi'); e.target.textContent = aktif ? 'Jangan ingatkan saya lagi' : 'Nyalakan pengingat lagi'; }).catch(function (x) { UI.toast(x.message, true); });
+      } }, S.state.pengingat_mati ? 'Nyalakan pengingat lagi' : 'Jangan ingatkan saya lagi')) : null);
   }
 
   // ---------- Router fase ----------

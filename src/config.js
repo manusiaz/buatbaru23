@@ -48,6 +48,7 @@ const config = {
   waApiVersion: env.WA_API_VERSION || 'v21.0',
   waTemplateLink: env.WA_TEMPLATE_LINK || '',
   waTemplateHasil: env.WA_TEMPLATE_HASIL || '',
+  waTemplatePengingat: env.WA_TEMPLATE_PENGINGAT || '',
   waTemplateLang: env.WA_TEMPLATE_LANG || 'id',
 };
 

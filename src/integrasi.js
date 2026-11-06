@@ -55,6 +55,8 @@ const FIELDS = [
     cek: (v) => /^[a-z0-9_]{1,512}$/.test(v) || 'Nama template: huruf kecil, angka, garis bawah.' },
   { k: 'wa_template_hasil', grup: 'whatsapp', label: 'Nama template kirim hasil', cfg: 'waTemplateHasil', env: 'WA_TEMPLATE_HASIL', rahasia: false,
     cek: (v) => /^[a-z0-9_]{1,512}$/.test(v) || 'Nama template: huruf kecil, angka, garis bawah.' },
+  { k: 'wa_template_pengingat', grup: 'whatsapp', label: 'Nama template pengingat (follow-up otomatis)', cfg: 'waTemplatePengingat', env: 'WA_TEMPLATE_PENGINGAT', rahasia: false,
+    cek: (v) => /^[a-z0-9_]{1,512}$/.test(v) || 'Nama template: huruf kecil, angka, garis bawah.' },
   { k: 'wa_template_lang', grup: 'whatsapp', label: 'Bahasa template', cfg: 'waTemplateLang', env: 'WA_TEMPLATE_LANG', rahasia: false, bawaan: 'id',
     cek: (v) => /^[a-z]{2}(_[A-Z]{2})?$/.test(v) || 'Kode bahasa, mis. id atau en_US.' },
   // Email

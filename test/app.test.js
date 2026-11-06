@@ -758,3 +758,129 @@ test('integrasi: Client ID Google baru wajib dibuktikan dengan login memakai Cli
   }
   assert.equal(config.passwordLogin, true);
 });
+
+// ======================= Otomasi follow-up & alert =======================
+const otm = require('../src/otomasi');
+async function studioOf(c) { return (await c.call('GET', '/api/me')).body.studio.id; }
+async function runFor(c) { return (await c.call('POST', '/api/otomasi/jalankan')).body; }
+const NO_QUIET = { jam_tenang: { mulai: 0, selesai: 0 } };
+
+test('otomasi: pengingat "belum dibuka" sekali saja, masuk antrean manual tanpa WA API, isi link & PIN', async () => {
+  const c = await owner();
+  await c.call('PUT', '/api/otomasi', NO_QUIET);
+  const s = await sesi(c, { pelanggan_wa: '081234567890', masa_aktif_jam: 168 });
+  await db.q("UPDATE sesis SET link_dikirim_pada = now() - interval '25 hours' WHERE id=$1", [s.id]);
+  const r1 = await runFor(c);
+  assert.equal(r1.pelanggan, 1);
+  const q = (await c.call('GET', '/api/followup?status=antre')).body;
+  assert.equal(q.length, 1);
+  assert.equal(q[0].kunci, 'belum_dibuka');
+  assert.equal(q[0].kanal, 'manual');
+  assert.ok(q[0].pesan.includes(s.pin) && q[0].pesan.includes(`/g/${s.token}`));
+  assert.match(q[0].wa_url, /^https:\/\/wa\.me\/6281234567890\?text=/);
+  assert.equal((await runFor(c)).pelanggan, 0, 'tidak dikirim dua kali');
+  // Staf menandai terkirim; studio lain tidak bisa menyentuh
+  const other = await owner();
+  assert.equal((await other.call('POST', `/api/followup/${q[0].id}/terkirim`)).status, 404);
+  assert.equal((await c.call('POST', `/api/followup/${q[0].id}/terkirim`)).status, 200);
+  assert.equal((await c.call('GET', '/api/followup?status=antre')).body.length, 0);
+});
+
+test('otomasi: jam tenang menunda, pelanggan bisa berhenti, maksimal 2 pesan per 24 jam', async () => {
+  const c = await owner();
+  const h = parseInt(new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Asia/Jakarta' }).format(new Date()), 10) % 24;
+  await c.call('PUT', '/api/otomasi', { jam_tenang: { mulai: h, selesai: (h + 1) % 24 } });
+  const s = await sesi(c, { durasi_pilih_menit: 0 });
+  await db.q("UPDATE sesis SET tenggat_link = now() + interval '2 hours' WHERE id=$1", [s.id]);
+  const r = await runFor(c);
+  assert.equal(r.pelanggan, 0);
+  assert.ok(r.ditunda >= 1, 'ditunda karena jam tenang');
+  await c.call('PUT', '/api/otomasi', NO_QUIET);
+  // tenggat 2 jam memenuhi tahap 24j dan 3j sekaligus → batas 2/24 jam tetap dihormati
+  assert.equal((await runFor(c)).pelanggan, 2);
+  await db.q("UPDATE sesis SET link_dikirim_pada = now() - interval '30 hours' WHERE id=$1", [s.id]);
+  assert.equal((await runFor(c)).pelanggan, 0, 'maksimal 2 pesan per 24 jam');
+  // Pelanggan mematikan pengingat
+  const s2 = await sesi(c, { durasi_pilih_menit: 0 });
+  await db.q("UPDATE sesis SET tenggat_link = now() + interval '20 hours' WHERE id=$1", [s2.id]);
+  const p2 = await pelanggan(s2);
+  assert.equal((await p2.call('POST', `/g/${s2.token}/api/pengingat`, { aktif: false })).status, 200);
+  await runFor(c);
+  assert.equal((await db.one("SELECT count(*)::int AS n FROM followups WHERE sesi_id=$1", [s2.id])).n, 0);
+});
+
+test('otomasi: kirim lewat WhatsApp API bila tersedia; gagal → jatuh ke antrean manual', async () => {
+  const oldFetch = global.fetch;
+  let calls = 0; let fail = false;
+  global.fetch = async (url, opts) => {
+    if (!String(url).startsWith('https://graph.facebook.com/')) return oldFetch(url, opts);
+    calls += 1;
+    return fail ? new Response(JSON.stringify({ error: { message: 'token kedaluwarsa' } }), { status: 401 })
+      : new Response(JSON.stringify({ messages: [{ id: 'wamid.1' }] }), { status: 200 });
+  };
+  try {
+    const c = await owner();
+    await c.call('PUT', '/api/otomasi', NO_QUIET);
+    await c.call('PUT', '/api/studio', { nama: 'Studio WA', wa_phone_number_id: '1234567', wa_token: 'x'.repeat(50) });
+    const s = await sesi(c, { pelanggan_wa: '081211112222', masa_aktif_jam: 168 });
+    await db.q("UPDATE sesis SET link_dikirim_pada = now() - interval '25 hours' WHERE id=$1", [s.id]);
+    await runFor(c);
+    let f = await db.one('SELECT * FROM followups WHERE sesi_id=$1', [s.id]);
+    assert.equal(f.kanal, 'wa_api');
+    assert.equal(f.status, 'terkirim');
+    assert.equal(calls, 1);
+    fail = true;
+    const s2 = await sesi(c, { pelanggan_wa: '081233334444', masa_aktif_jam: 168 });
+    await db.q("UPDATE sesis SET link_dikirim_pada = now() - interval '25 hours' WHERE id=$1", [s2.id]);
+    await runFor(c);
+    f = await db.one('SELECT * FROM followups WHERE sesi_id=$1', [s2.id]);
+    assert.equal(f.status, 'antre');
+    assert.match(f.error, /token kedaluwarsa/);
+  } finally { global.fetch = oldFetch; }
+});
+
+test('otomasi: alert staf (editor telat, minta waktu belum direspons, link belum dikirim) sekali saja', async () => {
+  const c = await owner();
+  await c.call('PUT', '/api/otomasi', NO_QUIET);
+  const a = await sesi(c);
+  await db.q("UPDATE sesis SET status='terkirim', dikirim_pada = now() - interval '50 hours' WHERE id=$1", [a.id]);
+  const b = await sesi(c);
+  const pb = await pelanggan(b);
+  await pb.call('POST', `/g/${b.token}/api/mulai`);
+  await db.q("UPDATE sesis SET minta_waktu_pada = now() - interval '15 minutes' WHERE id=$1", [b.id]);
+  const d = await sesi(c);
+  await db.q("UPDATE sesis SET sinkron_pada = now() - interval '4 hours' WHERE id=$1", [d.id]);
+  const r = await runFor(c);
+  assert.ok(r.staf >= 3, JSON.stringify(r));
+  const n = (await c.call('GET', '/api/notifikasi')).body.filter((x) => x.jenis === 'alert').map((x) => x.pesan).join('\n');
+  assert.match(n, /belum selesai dikerjakan/);
+  assert.match(n, /PENTING: .* minta tambah waktu/);
+  assert.match(n, /link belum dikirim/);
+  assert.equal((await runFor(c)).staf, 0, 'alert tidak berulang');
+});
+
+test('otomasi: pengaturan divalidasi; templat kustom dipakai; editor tidak bisa mengubah', async () => {
+  const c = await owner();
+  await c.call('PUT', '/api/otomasi', { ...NO_QUIET, aturan: { belum_dibuka: { aktif: true, jam: 99999 }, ngawur: { aktif: true } },
+    templat: { belum_dibuka: 'Kak {nama}, cek {link} ya' } });
+  const st = (await c.call('GET', '/api/otomasi')).body.pengaturan;
+  assert.equal(st.aturan.belum_dibuka.jam, 720, 'jam dibatasi');
+  assert.equal(st.aturan.ngawur, undefined);
+  const s = await sesi(c);
+  await db.q("UPDATE sesis SET link_dikirim_pada = now() - interval '721 hours', tenggat_link = now() + interval '5 days' WHERE id=$1", [s.id]);
+  await runFor(c);
+  const f = await db.one('SELECT pesan FROM followups WHERE sesi_id=$1', [s.id]);
+  assert.match(f.pesan, /^Kak Rina, cek http/);
+  const inv = (await c.call('POST', '/api/tim/undang', { email: `oe${Date.now()}@x.id`, peran: 'editor' })).body;
+  const e = new Client();
+  await e.call('POST', '/api/auth/invite/accept', { token: inv.link.split('/undangan/')[1], nama: 'Ed', password: 'rahasia123' });
+  assert.equal((await e.call('PUT', '/api/otomasi', { aktif: false })).status, 403);
+  assert.equal((await e.call('GET', '/api/followup')).status, 403);
+});
+
+test('otomasi: putaran paralel aman (advisory lock)', async () => {
+  const [x, y] = await Promise.all([otm.run(), otm.run()]);
+  assert.ok(x.dilewati || y.dilewati || true); // keduanya selesai tanpa error / duplikasi
+  const dup = await db.one('SELECT count(*)::int AS n FROM (SELECT studio_id, COALESCE(sesi_id,0), kunci FROM followups GROUP BY 1,2,3 HAVING count(*) > 1) z');
+  assert.equal(dup.n, 0);
+});

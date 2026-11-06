@@ -63,7 +63,7 @@
     var cur = (location.hash.split('?')[0].split('/')[1]) || 'dasbor';
     var items = [['dasbor', 'Dasbor', 'dasbor'], ['galeri', 'Galeri', 'galeri'], ['pilihan', 'Pilihan masuk', 'pilih', ME.pilihan_baru],
       ['notifikasi', 'Notifikasi', 'lonceng', ME.notif_belum_dibaca]];
-    if (can('sesi.kelola')) items.push(['kiosk', 'Mode kiosk', 'kiosk'], ['laporan', 'Laporan', 'laporan']);
+    if (can('sesi.kelola')) items.push(['otomasi', 'Otomasi & follow-up', 'sinkron', ME.followup_antre], ['kiosk', 'Mode kiosk', 'kiosk'], ['laporan', 'Laporan', 'laporan']);
     items.push(['paket', 'Paket & harga', 'paket']);
     if (can('sesi.kelola')) items.push(['tim', 'Tim & peran', 'tim']);
     if (can('studio.edit')) items.push(['pengaturan', 'Pengaturan', 'pengaturan']);
@@ -103,6 +103,7 @@
       if (r === 'pengaturan') return pagePengaturan();
       if (r === 'profil') return pageProfil();
       if (r === 'kiosk') return pageKiosk();
+      if (r === 'otomasi') return pageOtomasi(parts[1] || 'antrean');
       if (r === 'laporan') return pageLaporan();
       if (r === 'massal') return pageMassal();
       if (r === 'langganan') return pageLangganan();
@@ -527,6 +528,7 @@
       leftCol.appendChild(tagihanCard(s));
       leftCol.appendChild(editorCard(s));
       leftCol.appendChild(hasilCard(s));
+      if (can('sesi.kelola')) leftCol.appendChild(pengingatCard(s));
       if (can('sesi.kelola') && s.sumber === 'service_account') leftCol.appendChild(terpilihCard(s, load));
       if (can('sesi.kelola')) leftCol.appendChild(settingsCard(s));
       bottom.appendChild(leftCol);
@@ -569,7 +571,7 @@
   var EVENT = { dibuat: 'Galeri dibuat', sinkron: 'Sinkron Drive', sinkron_gagal: 'Sinkron gagal', dibuka: 'Pelanggan membuka galeri', mulai: 'Mulai pilih', pilih: 'Pilih', batal: 'Batal pilih',
     kirim: 'Pilihan dikirim', waktu_habis: 'Waktu habis · terkirim otomatis', perpanjang: 'Waktu ditambah', perpanjang_link: 'Tenggat link diperpanjang', buka_ulang: 'Dibuka ulang',
     reset_timer: 'Timer di-reset', minta_waktu: 'Minta tambah waktu', tolak_minta_waktu: 'Permintaan waktu ditutup', kedaluwarsa: 'Kedaluwarsa', bayar: 'Status bayar', editor: 'Status editor',
-    ubah: 'Pengaturan sesi diubah', ganti_pin: 'PIN diganti', pin_terkunci: 'PIN terkunci 15 menit', link_dikirim: 'Link dikirim via WhatsApp' };
+    ubah: 'Pengaturan sesi diubah', followup: 'Follow-up', pengingat: 'Pengingat otomatis', ganti_link: 'Link diganti', ganti_pin: 'PIN diganti', pin_terkunci: 'PIN terkunci 15 menit', link_dikirim: 'Link dikirim via WhatsApp' };
   function eventLabel(e) { return EVENT[e.jenis] || e.jenis; }
   function eventDetail(e) {
     var d = e.detail || {};
@@ -1360,6 +1362,121 @@
       return row;
     }
     load();
+  }
+
+
+  // ---------- Otomasi follow-up & alert ----------
+  var FU_NAMA = { belum_dibuka: 'Belum membuka link', kedaluwarsa: 'Kedaluwarsa tanpa pilihan', kedaluwarsa_staf: 'Kedaluwarsa (tim)', belum_bayar: 'Belum bayar foto tambahan',
+    hasil: 'Kirim hasil', editor_telat: 'Editor terlambat', link_belum_dikirim: 'Link belum dikirim' };
+  function fuLabel(k) {
+    if (FU_NAMA[k]) return FU_NAMA[k];
+    if (/^tenggat_dekat:/.test(k)) return 'Tenggat ' + k.split(':')[1].replace('j', ' jam') + ' lagi';
+    if (/^minta_waktu:/.test(k)) return 'Minta waktu belum direspons';
+    if (/^sinkron_gagal/.test(k)) return 'Sinkron gagal';
+    if (/^kuota:/.test(k)) return 'Kuota hampir habis';
+    if (/^digest:/.test(k)) return 'Ringkasan mingguan';
+    return k;
+  }
+  function fuBadge(f) {
+    var m = { terkirim: ['st-siap', f.kanal === 'wa_api' ? 'Terkirim otomatis' : f.target === 'staf' ? 'Dikirim ke tim' : 'Ditandai terkirim'], antre: ['st-segera', 'Menunggu dikirim'], gagal: ['st-kedaluwarsa', 'Gagal'], dilewati: ['st-selesai', 'Dilewati'] }[f.status];
+    return h('span.badge.' + m[0], m[1]);
+  }
+  function pageOtomasi(tab) {
+    main.appendChild(head('Otomasi & follow-up', 'Pengingat pelanggan & alert tim', can('studio.edit') ? [h('button.btn.btn-secondary', { type: 'button', onclick: function () {
+      api('POST', '/api/otomasi/jalankan').then(function (r) { UI.toast('Diproses: ' + r.pelanggan + ' ke pelanggan, ' + r.staf + ' alert tim' + (r.ditunda ? ', ' + r.ditunda + ' ditunda' : '')); refreshMe(); route(); }).catch(err);
+    } }, ic('sinkron'), 'Jalankan sekarang')] : null));
+    main.appendChild(h('div.seg', { style: { marginBottom: '16px' } }, [['antrean', 'Antrean · ' + (ME.followup_antre || 0)], ['riwayat', 'Riwayat'], ['pengaturan', 'Pengaturan']].map(function (t) {
+      return h('a', { href: '#/otomasi/' + t[0], class: tab === t[0] ? 'on' : '' }, t[1]);
+    })));
+    var box = h('div.stack'); main.appendChild(box);
+    if (tab === 'pengaturan') return otomasiSettings(box);
+    api('GET', '/api/followup' + (tab === 'antrean' ? '?status=antre' : '')).then(function (rows) {
+      if (tab === 'antrean') box.appendChild(h('div.alert.info', 'Pengingat yang tidak bisa dikirim otomatis (WhatsApp API belum aktif, nomor kosong, atau gagal) menunggu di sini. Tekan ', h('b', 'Kirim via WhatsApp'), ': chat terbuka dengan pesan siap kirim, lalu otomatis ditandai terkirim.'));
+      if (!rows.length) { box.appendChild(h('div.card.empty', h('p.title', tab === 'antrean' ? 'Antrean kosong' : 'Belum ada riwayat'), h('p', 'Pengingat & alert muncul di sini setelah aturan otomasi terpicu.'))); return; }
+      box.appendChild(h('div.stack', { style: { gap: '12px' } }, rows.map(function (f) {
+        return h('section.card.card-sm',
+          h('div.row', { style: { justifyContent: 'space-between' } },
+            h('div', h('b', fuLabel(f.kunci)), ' · ', f.target === 'pelanggan' ? (f.pelanggan_nama || '-') : 'Tim studio', f.sesi_id ? [' · ', h('a', { href: '#/galeri/' + f.sesi_id }, f.judul)] : null),
+            h('div.row', fuBadge(f), h('span.small.muted', UI.rel(f.dikirim_pada || f.dibuat_pada)))),
+          h('p.small', { style: { whiteSpace: 'pre-wrap', margin: '8px 0' } }, f.pesan),
+          f.error ? h('p.small.err-text', 'API gagal: ' + f.error) : null,
+          f.status === 'antre' ? h('div.row',
+            f.tujuan ? h('a.btn.btn-amber.btn-sm', { href: f.wa_url, target: '_blank', rel: 'noopener', onclick: function () {
+              setTimeout(function () { api('POST', '/api/followup/' + f.id + '/terkirim').then(function () { refreshMe(); route(); }).catch(err); }, 300);
+            } }, ic('wa'), 'Kirim via WhatsApp') : h('span.small.muted', 'Nomor WA pelanggan kosong'),
+            h('button.btn.btn-sm.btn-secondary', { type: 'button', onclick: function () { UI.copy(f.pesan, 'Pesan tersalin'); } }, ic('salin'), 'Salin'),
+            h('button.btn.btn-sm.btn-text', { type: 'button', onclick: function () { api('POST', '/api/followup/' + f.id + '/lewati').then(function () { refreshMe(); route(); }).catch(err); } }, 'Lewati')) : null);
+      })));
+    }).catch(err);
+  }
+  function otomasiSettings(box) {
+    api('GET', '/api/otomasi').then(function (d) {
+      var p = d.pengaturan, edit = can('studio.edit'), f = { aturan: {}, templat: {} };
+      var dis = !edit;
+      f.aktif = h('input', { type: 'checkbox', checked: p.aktif, disabled: dis });
+      f.staf_wa = h('input', { type: 'checkbox', checked: p.staf_wa, disabled: dis });
+      f.mulai = h('input.input', { type: 'number', min: 0, max: 23, value: p.jam_tenang.mulai, disabled: dis, style: { width: '90px' } });
+      f.selesai = h('input.input', { type: 'number', min: 0, max: 23, value: p.jam_tenang.selesai, disabled: dis, style: { width: '90px' } });
+      box.appendChild(h('section.card', h('h2.title', 'Umum'),
+        h('div.toggle-row', h('div', h('b', 'Otomasi aktif'), h('span.small.muted', 'Matikan untuk menghentikan semua pengingat & alert studio ini.')), h('label.switch', f.aktif, h('span'))),
+        h('div.toggle-row', h('div', h('b', 'Jam tenang (waktu studio)'), h('span.small.muted', 'Pesan ke pelanggan tidak dikirim di rentang ini, ditunda sampai jam tenang selesai.')),
+          h('div.row', { style: { flexWrap: 'nowrap' } }, f.mulai, h('span', '–'), f.selesai)),
+        h('div.toggle-row', h('div', h('b', 'Alert tim juga ke WhatsApp studio'), h('span.small.muted', d.wa_api ? 'Dikirim ke nomor WA studio di Pengaturan.' : 'Butuh WhatsApp API aktif.')), h('label.switch', f.staf_wa, h('span'))),
+        h('p.small.muted', 'Kanal: pelanggan → ', h('b', d.wa_api ? 'WhatsApp API otomatis' : 'antrean klik-kirim (WhatsApp API belum aktif)'), ' · tim → notifikasi aplikasi', d.smtp ? ' + email' : '', '. Maksimal 2 pesan per pelanggan per 24 jam; setiap pengingat hanya sekali.')));
+      var groups = [['Ke pelanggan', ['belum_dibuka', 'tenggat_dekat', 'kedaluwarsa', 'belum_bayar', 'hasil_otomatis']],
+        ['Alert ke tim studio', ['editor_telat', 'minta_waktu', 'link_belum_dikirim', 'sinkron_gagal', 'kuota_hampir_habis', 'digest_mingguan']]];
+      groups.forEach(function (g) {
+        var sec = h('section.card', h('h2.title', g[0]));
+        g[1].forEach(function (k) {
+          var a = p.aturan[k], row = { aktif: h('input', { type: 'checkbox', checked: a.aktif, disabled: dis }) };
+          var unit = null;
+          if (a.jam !== undefined) {
+            row.jam = h('input.input', { value: Array.isArray(a.jam) ? a.jam.join(', ') : a.jam, disabled: dis, style: { width: '110px' }, 'aria-label': 'Jam' });
+            unit = h('div.row', { style: { flexWrap: 'nowrap', gap: '6px' } }, row.jam, h('span.small.muted', k === 'tenggat_dekat' ? 'jam sebelum tenggat' : 'jam'));
+          } else if (a.menit !== undefined) {
+            row.menit = h('input.input', { type: 'number', value: a.menit, disabled: dis, style: { width: '90px' } });
+            unit = h('div.row', { style: { flexWrap: 'nowrap', gap: '6px' } }, row.menit, h('span.small.muted', 'menit'));
+          } else if (a.persen !== undefined) {
+            row.persen = h('input.input', { type: 'number', value: a.persen, disabled: dis, style: { width: '90px' } });
+            unit = h('div.row', { style: { flexWrap: 'nowrap', gap: '6px' } }, row.persen, h('span.small.muted', '% terpakai'));
+          }
+          f.aturan[k] = row;
+          sec.appendChild(h('div.toggle-row', h('div', { style: { flex: 1 } }, h('b', d.nama[k]), unit ? h('div', { style: { marginTop: '6px' } }, unit) : null), h('label.switch', row.aktif, h('span'))));
+          if (d.bawaan.templat[k]) {
+            var ta = h('textarea.textarea', { rows: 3, disabled: dis, placeholder: d.bawaan.templat[k], style: { fontSize: '13px' } });
+            ta.value = p.templat[k] === d.bawaan.templat[k] ? '' : p.templat[k];
+            f.templat[k] = ta;
+            sec.appendChild(h('details', { style: { margin: '-6px 0 10px' } }, h('summary.small', { style: { cursor: 'pointer', color: 'var(--link)' } }, 'Ubah teks pesan'),
+              h('div', { style: { marginTop: '8px' } }, ta, h('span.small.muted', 'Variabel: {nama} {judul} {studio} {link} {pin} {tenggat}' + (k === 'tenggat_dekat' ? ' {sisa}' : '') + (k === 'belum_bayar' ? ' {jumlah} {total} {bayar}' : '') + '. Kosongkan untuk teks bawaan.'))));
+          }
+        });
+        box.appendChild(sec);
+      });
+      if (edit) box.appendChild(h('div.row', { style: { justifyContent: 'flex-end' } }, h('button.btn.btn-primary', { type: 'button', onclick: function () {
+        var body = { aktif: f.aktif.checked, staf_wa: f.staf_wa.checked, jam_tenang: { mulai: f.mulai.value, selesai: f.selesai.value }, aturan: {}, templat: {} };
+        Object.keys(f.aturan).forEach(function (k) {
+          var r = f.aturan[k], o = { aktif: r.aktif.checked };
+          if (r.jam) o.jam = k === 'tenggat_dekat' ? r.jam.value.split(',') : r.jam.value;
+          if (r.menit) o.menit = r.menit.value;
+          if (r.persen) o.persen = r.persen.value;
+          body.aturan[k] = o;
+        });
+        Object.keys(f.templat).forEach(function (k) { body.templat[k] = f.templat[k].value; });
+        api('PUT', '/api/otomasi', body).then(function () { UI.toast('Pengaturan otomasi disimpan'); route(); }).catch(err);
+      } }, 'Simpan pengaturan')));
+    }).catch(err);
+  }
+  function pengingatCard(s) {
+    var cb = h('input', { type: 'checkbox', checked: !s.pengingat_mati, onchange: function (e) {
+      api('PUT', '/api/sesis/' + s.id + '/pengingat', { aktif: e.target.checked }).then(function () { UI.toast(e.target.checked ? 'Pengingat aktif' : 'Pengingat dimatikan'); }).catch(err);
+    } });
+    var list = (s.followups || []).map(function (f) {
+      return h('li', h('time', UI.fmtDate(f.dikirim_pada || f.dibuat_pada, tz(), { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })),
+        h('div', h('b', fuLabel(f.kunci)), ' ', fuBadge(f)));
+    });
+    return h('section.card', h('h2.title', 'Pengingat otomatis'),
+      h('div.toggle-row', { style: { borderTop: 0, paddingTop: 0 } }, h('div', h('b', 'Kirim pengingat ke pelanggan ini'), h('span.small.muted', 'Belum buka link, tenggat dekat, belum bayar. Atur aturannya di menu Otomasi.')), h('label.switch', cb, h('span'))),
+      list.length ? h('ul.log', list) : h('p.small.muted', 'Belum ada pengingat untuk sesi ini.'));
   }
 
   // ---------- Pengaturan: cabang & WhatsApp ----------

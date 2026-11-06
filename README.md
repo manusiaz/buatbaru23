@@ -120,6 +120,30 @@ Audit keamanan independen dijalankan (exploit dicoba langsung). Semua temuan sud
 
 Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat API, CSRF, path traversal, tanda tangan URL media, SSRF.
 
+### Otomasi follow-up & alert
+
+Menu **Otomasi & follow-up** (owner/admin). Mesin otomasi berjalan tiap 5 menit di server.
+
+| Ke pelanggan | Bawaan |
+| --- | --- |
+| Link sudah dikirim tapi galeri belum dibuka | setelah 24 jam |
+| Tenggat memilih sudah dekat, belum kirim pilihan | 24 jam & 3 jam sebelum tenggat |
+| Galeri kedaluwarsa tanpa pilihan (pelanggan + tim) | sekali |
+| Foto tambahan belum dibayar (dengan link bayar online bila aktif) | 24 jam setelah terkirim |
+| Kirim hasil edit otomatis saat link hasil disimpan | mati (opsional) |
+
+| Alert ke tim studio | Bawaan |
+| --- | --- |
+| Pilihan masuk belum selesai dikerjakan (ke owner/admin + editor yang ditugaskan) | 48 jam |
+| Pelanggan minta tambah waktu tapi belum direspons | 10 menit |
+| Galeri siap tapi link belum dikirim | 3 jam |
+| Sinkron Drive gagal · Kuota sesi bulanan hampir habis (80%) | sekali |
+| Ringkasan mingguan | Senin pagi |
+
+- **Kanal:** ke pelanggan lewat WhatsApp Cloud API bila aktif (template `WA_TEMPLATE_PENGINGAT` dengan {{1}} nama, {{2}} isi pesan; tanpa template dikirim sebagai teks). Bila API tidak ada/gagal, pesan masuk **antrean klik-kirim** (wa.me dengan pesan siap kirim, otomatis ditandai terkirim). Ke tim: notifikasi aplikasi + email (bila SMTP) + opsional WhatsApp studio.
+- **Anti-spam:** tiap aturan hanya sekali per sesi/tahap, jam tenang (bawaan 21.00–08.00 waktu studio), maks 2 pesan per pelanggan per 24 jam, pelanggan bisa menekan "Jangan ingatkan saya lagi" di galeri, staf bisa mematikan pengingat per sesi.
+- Semua aturan bisa dinyalakan/dimatikan, diatur waktunya, dan teks pesannya bisa diubah per studio. Aman untuk banyak instance (advisory lock PostgreSQL).
+
 ### Integrasi & kunci API (satu halaman)
 
 Menu **Integrasi & kunci API** (khusus super admin) mengatur semua kredensial dari satu tempat: Google (Client ID, API key, service account, App ID), Midtrans, WhatsApp Cloud API, SMTP, dan kontak keamanan. Nilai di halaman ini mengalahkan `.env`; `.env` tetap jadi cadangan. Perubahan langsung berlaku tanpa restart, dan semua instance memuat ulang tiap menit.
@@ -153,7 +177,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000 (NODE_ENV=development)
 ```
 
-Tes integrasi (37 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (43 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

@@ -16,6 +16,7 @@ async function main() {
   sesi.startBackground();
   retensi.start();
   require('./saldo').start();
+  require('./otomasi').start();
   await sync.resumePending();
   const app = createApp();
   const server = app.listen(config.port, () => {
