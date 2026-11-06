@@ -26,16 +26,17 @@ function serviceAccountEmail() {
   return sa ? sa.client_email : null;
 }
 
-let tokenCache = { token: null, exp: 0 };
-async function saAccessToken() {
+const tokenCaches = {};
+async function saAccessToken(scope = 'https://www.googleapis.com/auth/drive.readonly') {
   const sa = serviceAccount();
   if (!sa) throw new DriveError('Service account Google belum dikonfigurasi (GOOGLE_SERVICE_ACCOUNT_JSON).', 'no_sa');
   const now = Math.floor(Date.now() / 1000);
+  const tokenCache = tokenCaches[scope] || { token: null, exp: 0 };
   if (tokenCache.token && tokenCache.exp - 60 > now) return tokenCache.token;
   const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const claim = Buffer.from(JSON.stringify({
     iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive.readonly',
+    scope,
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -51,8 +52,8 @@ async function saAccessToken() {
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new DriveError(`Gagal login service account: ${j.error_description || res.status}`, 'sa_auth');
-  tokenCache = { token: j.access_token, exp: now + (j.expires_in || 3600) };
-  return tokenCache.token;
+  tokenCaches[scope] = { token: j.access_token, exp: now + (j.expires_in || 3600) };
+  return j.access_token;
 }
 
 class DriveError extends Error {
@@ -240,7 +241,40 @@ async function shareFolderWithServiceAccount(userAccessToken, folderId) {
   return true;
 }
 
+// F-42: salin file terpilih ke subfolder "Terpilih" (butuh service account sebagai Editor folder)
+async function writeFetch(url, opts = {}, attempt = 0) {
+  const token = await saAccessToken('https://www.googleapis.com/auth/drive');
+  const res = await fetch(url, { ...opts, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(opts.headers || {}) } });
+  if (res.ok) return res.json();
+  const j = await res.json().catch(() => ({}));
+  const reason = j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason;
+  if ((res.status === 429 || res.status >= 500 || /rateLimit/i.test(reason || '')) && attempt < 5) {
+    await sleep(500 * 2 ** attempt);
+    return writeFetch(url, opts, attempt + 1);
+  }
+  throw new DriveError((j.error && j.error.message) || `HTTP ${res.status}`, reason || 'http_' + res.status, res.status);
+}
+async function ensureSubfolder(parentId, name) {
+  const q = new URL(`${API}/files`);
+  q.searchParams.set('q', `'${parentId}' in parents and name = '${name.replace(/'/g, "\\'")}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
+  q.searchParams.set('fields', 'files(id)');
+  q.searchParams.set('supportsAllDrives', 'true');
+  q.searchParams.set('includeItemsFromAllDrives', 'true');
+  const found = await writeFetch(q.toString());
+  if (found.files && found.files[0]) return found.files[0].id;
+  const c = new URL(`${API}/files`);
+  c.searchParams.set('supportsAllDrives', 'true');
+  const f = await writeFetch(c.toString(), { method: 'POST', body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentId] }) });
+  return f.id;
+}
+async function copyFile(fileId, parentId, name) {
+  const u = new URL(`${API}/files/${encodeURIComponent(fileId)}/copy`);
+  u.searchParams.set('supportsAllDrives', 'true');
+  return writeFetch(u.toString(), { method: 'POST', body: JSON.stringify({ parents: [parentId], name }) });
+}
+
 module.exports = {
+  ensureSubfolder, copyFile,
   DriveError, parseFolderLink, checkAccess, listImages, fetchImage,
   shareFolderWithServiceAccount, serviceAccountEmail, IMAGE_EXT,
 };

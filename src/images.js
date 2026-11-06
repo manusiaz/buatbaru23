@@ -69,9 +69,14 @@ async function ensure(sesi, foto, kind, wmText) {
   const src = await sourceFor(sesi, foto, SIZES[kind]);
   const buf = await render(src, kind, wmText);
   await fs.promises.mkdir(path.dirname(p), { recursive: true });
-  const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   await fs.promises.writeFile(tmp, buf);
-  await fs.promises.rename(tmp, p);
+  try {
+    await fs.promises.rename(tmp, p);
+  } catch (e) {
+    await fs.promises.rm(tmp, { force: true });
+    if (!fs.existsSync(p)) throw e;
+  }
   return p;
 }
 

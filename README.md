@@ -42,22 +42,58 @@ Semua langkah di Google Cloud Console, dalam satu project:
 
 Tanpa variabel di atas, aplikasi tetap jalan dengan sumber **Foto contoh**. Pilihan Drive yang konfigurasinya belum diisi akan tampil nonaktif.
 
-## Apa yang sudah ada (P0 · MVP)
+## Fitur (semua P0, P1, P2 di PRD)
+
+**MVP (P0)**
 
 | Area | Kebutuhan PRD |
 | --- | --- |
-| Studio, tim, paket | F-01 daftar/masuk email atau Google; branding (nama, logo, warna, WA, zona waktu, watermark, retensi). F-02 undang Admin/Editor lewat link. F-03/F-04 paket, dengan nilai yang disalin ke sesi dan bisa diubah per sesi. |
-| Sesi & Drive | F-06 buat sesi. F-51 Google Picker lalu folder otomatis dibagikan ke service account. F-07 cek akses beserta langkah perbaikan. F-08 sinkron dengan progres "x dari y". F-09 sinkron ulang (file baru, terhapus, ganti nama, isi berubah). F-10 nama kembar ditandai dan subfolder ditampilkan. |
-| Akses pelanggan | F-13 link 128-bit dan PIN 4–6 digit (hash, plus salinan terenkripsi untuk staf). F-14 tombol "Kirim via WhatsApp" dengan template. F-15 PIN terkunci 15 menit setelah 5 kali salah. |
-| Galeri | F-18 grid lazy-load, layar penuh dengan geser dan zoom. F-47 nomor tetap (#001…). F-19 ketuk ikon sudut untuk pilih, penghitung dan timer selalu terlihat. F-48 layar penuh dengan Pilih dan Salin link. F-20 setiap ketukan tersimpan di server. F-21 filter. F-22 catatan per foto dan catatan umum. F-23 watermark tanpa tombol unduh. F-24 ringkasan. F-49 Salin semua pilihan, lalu Kirim membuka WhatsApp studio. F-25 terkunci setelah kirim. |
-| Timer | F-27 tenggat link. F-28 hitung mundur dari "Mulai pilih" (jam server). F-29 peringatan 5 dan 1 menit (banner dan getar). F-30 kirim otomatis saat habis, dengan masa tenggang 10 detik. F-31 minta tambah waktu. F-32 perpanjang, buka ulang, dan reset, semuanya tercatat di log. Gangguan sistem memperpanjang timer otomatis. |
-| Foto tambahan | F-33 melebihi kuota bila paket mengizinkan, total biaya berjalan. F-34 status bayar Belum bayar/Lunas. |
-| Dasbor & editor | F-37 daftar sesi, status, filter, pencarian. F-38 detail dengan log aktivitas. F-39 salin nama file (nomor, per baris, koma, Lightroom, Windows, dengan atau tanpa ekstensi) serta unduh CSV/TXT dengan path subfolder. F-40 notifikasi in-app, dan email bila `SMTP_URL` diisi. Metrik PRD (waktu sampai pilihan masuk, % tepat waktu, % minta perpanjangan, attach rate) tampil di dasbor. |
-| Non-fungsional | RBAC ditegakkan di server, rate limit, cookie HttpOnly/SameSite, mutasi hanya JSON, ID/link Drive tidak pernah sampai ke browser pelanggan, retensi pratinjau otomatis (default 30 hari) dan log 12 bulan, hapus galeri beserta data pelanggan (UU PDP), halaman `/privasi`. |
+| Studio, tim, paket | F-01 daftar/masuk email atau Google; branding. F-02 undang Admin/Editor. F-03/F-04 paket, nilainya disalin ke sesi dan bisa diubah per sesi. |
+| Sesi & Drive | F-06, F-51 Google Picker + bagikan otomatis ke service account, F-07 cek akses + langkah perbaikan, F-08 sinkron dengan progres, F-09 sinkron ulang, F-10 nama kembar. |
+| Akses pelanggan | F-13 link 128-bit + PIN, F-14 tombol WhatsApp, F-15 PIN terkunci 15 menit setelah 5 kali salah. |
+| Galeri | F-18 grid + layar penuh, F-47 nomor tetap, F-19/F-48 pilih & salin link, F-20 simpan per ketukan, F-21 filter, F-22 catatan, F-23 watermark, F-24 ringkasan, F-49 salin semua + WhatsApp, F-25 terkunci setelah kirim. |
+| Timer | F-27 tenggat, F-28 hitung mundur (jam server), F-29 peringatan 5 & 1 menit, F-30 kirim otomatis, F-31 minta tambah waktu, F-32 perpanjang/buka ulang/reset + log. Gangguan sistem memperpanjang timer otomatis. |
+| Foto tambahan | F-33 melebihi kuota dengan total berjalan, F-34 status bayar. |
+| Dasbor & editor | F-37, F-38, F-39 salin nama file (Lightroom/Windows/baris/koma) + CSV/TXT dengan path, F-40 notifikasi in-app + email. |
 
-Bonus V1 yang ikut dikerjakan karena murah: F-41 (tugaskan editor dengan status Antre/Dikerjakan/Selesai) dan F-50 (tempel teks chat untuk mencocokkan nomor/link).
+**V1 (P1)**
 
-**Belum dikerjakan:** P1/P2 lainnya, yaitu WhatsApp Business API, QR, mode kiosk, bandingkan dua foto, payment gateway, salin ke folder "Terpilih" di Drive, laporan lengkap, langganan/billing, multi-cabang, dan super admin. Harga di landing page diambil dari tabel hipotesis PRD.
+| ID | Fitur | Di mana |
+| --- | --- | --- |
+| F-11 | Subfolder jadi tab di galeri | Galeri pelanggan |
+| F-16 | Link terkirim otomatis lewat WhatsApp Business Cloud API (saat sesi dibuat, tombol "Kirim otomatis", CSV massal, hasil akhir) | Pengaturan › WhatsApp, detail sesi |
+| F-17 | QR code sesi (lihat, unduh SVG, cetak) | Detail sesi › QR |
+| F-26 / PL7 | Bandingkan dua foto berdampingan (atas-bawah di HP), bisa pilih langsung | Galeri pelanggan › Bandingkan |
+| F-35 | Bayar foto tambahan online via Midtrans (QRIS, VA, e-wallet); webhook menandai Lunas otomatis | Halaman terkirim pelanggan, detail sesi › Link bayar online |
+| F-41 | Tugaskan editor, status Antre/Dikerjakan/Selesai | Detail sesi, Pilihan masuk |
+| F-42 | Salin file terpilih ke subfolder "Terpilih" di Drive | Detail sesi (butuh service account sebagai **Editor** folder) |
+| F-43 | Link hasil akhir: simpan, kirim via WhatsApp, tampil di galeri pelanggan | Detail sesi › Hasil akhir |
+| F-44 / S9 | Laporan: sesi, waktu sampai pilihan masuk, % tepat waktu, % minta perpanjangan, pendapatan foto tambahan, per hari/cabang/paket + CSV | Laporan |
+| F-45 / S10 | Mode kiosk: daftar sesi hari ini, buka tanpa PIN, timer mulai otomatis, selesai kembali ke kiosk | Mode kiosk |
+| F-46 | Langganan Gratis/Starter/Pro/Bisnis: batas sesi & pengguna, gating fitur, kredit sesi musiman, bayar via Midtrans | Langganan (aktif bila `BILLING_ENABLED=true`) |
+| F-50 | Tempel teks chat, nomor & link dikenali | Pilihan masuk |
+
+**V2 (P2)**
+
+| ID | Fitur | Di mana |
+| --- | --- | --- |
+| F-05 | Multi-cabang: kelola cabang, sesi per cabang, user bisa dibatasi ke satu cabang, filter & laporan per cabang | Pengaturan › Cabang, Tim, Galeri, Laporan |
+| F-12 | Buat sesi massal dari CSV (nama, no_wa, link_folder, paket, judul, tanggal, pin), salin semua link+PIN, kirim WA per baris | Galeri › Buat massal (CSV) |
+| F-36 | Harga bertingkat foto tambahan (mis. `5=100000`); sistem memilih total termurah | Paket & harga, buat/ubah sesi |
+
+**Super admin** (`SUPERADMIN_EMAILS`): ringkasan platform, daftar tenant, ubah paket/masa berlaku/kredit, tangguhkan studio, log audit.
+
+Keamanan & non-fungsional: RBAC ditegakkan di server, rate limit, cookie HttpOnly/SameSite, mutasi hanya JSON, ID/link Drive tidak pernah sampai ke browser pelanggan, webhook diverifikasi signature SHA-512, token WA studio dienkripsi, retensi pratinjau otomatis dan log 12 bulan, hapus galeri beserta data pelanggan (UU PDP), halaman `/privasi`.
+
+### Integrasi yang butuh kredensial
+
+Semua fitur di atas jalan tanpa kredensial pihak ketiga **kecuali** yang memang memanggil layanan luar. Yang ini sudah ditulis lengkap tapi **belum pernah dites ke layanan aslinya**, jadi uji dulu dengan akun sandbox:
+
+- **Google Drive** (service account, link publik, Picker, salin ke "Terpilih").
+- **Midtrans**: pakai sandbox dulu (`MIDTRANS_PRODUCTION=false`), set Payment Notification URL ke `{BASE_URL}/api/webhooks/midtrans`.
+- **WhatsApp Cloud API**: pesan pembuka ke pelanggan wajib memakai template yang disetujui Meta (`WA_TEMPLATE_LINK`, `WA_TEMPLATE_HASIL`). Tanpa template, pesan dikirim sebagai teks biasa dan hanya sampai bila pelanggan pernah chat ke nomor itu dalam 24 jam terakhir.
+
+Tanpa kredensial, tombolnya disembunyikan atau memberi pesan jelas, dan alur manual (wa.me, bayar di kasir) tetap jalan.
 
 ## Pengembangan
 
@@ -67,7 +103,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000
 ```
 
-Tes integrasi butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (21 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test
@@ -80,7 +116,8 @@ CI GitHub Actions (`.github/workflows/ci.yml`) menjalankan tes di Postgres 16 da
 ```
 src/            server (Express): routes/studio.js (API studio), routes/client.js (API galeri pelanggan),
                 sesi.js (aturan timer & status), sync.js (sinkron Drive), drive.js (Drive REST),
-                images.js + media.js (pratinjau ber-watermark & URL bertanda tangan), retensi.js
+                images.js + media.js (pratinjau ber-watermark & URL bertanda tangan), retensi.js,
+                plans.js (langganan), wa.js (WhatsApp Cloud API), payment.js + routes/webhooks.js (Midtrans)
 public/         index.html (landing), masuk.html, app.html (dasbor studio), galeri.html (pelanggan)
 public/shared/format.js   format teks salin/CSV, dipakai server & browser
 migrations/     SQL skema

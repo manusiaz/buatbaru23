@@ -2,6 +2,7 @@
 // Aturan timer, status sesi, pilihan, dan tagihan foto tambahan.
 const db = require('./db');
 const { notify } = require('./notify');
+const F = require('../public/shared/format');
 
 const GRACE_MS = 10 * 1000; // simpanan yang tiba <=10 detik setelah waktu habis masih diterima
 
@@ -20,10 +21,13 @@ async function recomputeTagihan(c, sesi) {
   const r = await c.query('SELECT count(*)::int AS n FROM pilihans WHERE sesi_id=$1', [sesi.id]);
   const n = r.rows[0].n;
   const tambahan = Math.max(0, n - sesi.kuota);
+  const total = F.hargaTambahan(tambahan, sesi.harga_foto_tambahan, sesi.harga_bertingkat || []);
+  // Status bayar kembali "belum" bila tagihan berubah setelah lunas
   await c.query(`INSERT INTO tagihans(sesi_id, jumlah_foto, total_rupiah) VALUES ($1,$2,$3)
-    ON CONFLICT (sesi_id) DO UPDATE SET jumlah_foto=EXCLUDED.jumlah_foto, total_rupiah=EXCLUDED.total_rupiah, diubah_pada=now()`,
-  [sesi.id, tambahan, tambahan * sesi.harga_foto_tambahan]);
-  return { jumlah: n, tambahan };
+    ON CONFLICT (sesi_id) DO UPDATE SET jumlah_foto=EXCLUDED.jumlah_foto, total_rupiah=EXCLUDED.total_rupiah, diubah_pada=now(),
+      status_bayar = CASE WHEN tagihans.status_bayar='lunas' AND EXCLUDED.total_rupiah > COALESCE(tagihans.payment_total, tagihans.total_rupiah) THEN 'belum_bayar' ELSE tagihans.status_bayar END`,
+  [sesi.id, tambahan, total]);
+  return { jumlah: n, tambahan, total };
 }
 
 async function submit(c, sesi, { otomatis = false, aktor = 'pelanggan' } = {}) {

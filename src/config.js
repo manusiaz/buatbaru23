@@ -26,6 +26,22 @@ const config = {
   previewUrlTtlSec: Math.min(int(env.PREVIEW_URL_TTL_SEC, 3600), 3600),
   allowDemoSource: env.ALLOW_DEMO_SOURCE !== 'false',
   isProd: env.NODE_ENV === 'production',
+  // Langganan (F-46). false = semua fitur terbuka tanpa batas (cocok untuk satu studio sendiri)
+  billingEnabled: /^(1|true)$/i.test(env.BILLING_ENABLED || ''),
+  superadminEmails: String(env.SUPERADMIN_EMAILS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+  kreditPaket: int(env.KREDIT_PAKET_SESI, 100),
+  kreditHarga: int(env.KREDIT_PAKET_HARGA, 149000),
+  // Payment gateway Midtrans (F-35)
+  midtransServerKey: env.MIDTRANS_SERVER_KEY || '',
+  midtransClientKey: env.MIDTRANS_CLIENT_KEY || '',
+  midtransProduction: /^(1|true)$/i.test(env.MIDTRANS_PRODUCTION || ''),
+  // WhatsApp Business Cloud API (F-16) — default platform; studio bisa isi miliknya sendiri
+  waToken: env.WA_CLOUD_TOKEN || '',
+  waPhoneNumberId: env.WA_PHONE_NUMBER_ID || '',
+  waApiVersion: env.WA_API_VERSION || 'v21.0',
+  waTemplateLink: env.WA_TEMPLATE_LINK || '',
+  waTemplateHasil: env.WA_TEMPLATE_HASIL || '',
+  waTemplateLang: env.WA_TEMPLATE_LANG || 'id',
 };
 
 if (!config.appSecret) {

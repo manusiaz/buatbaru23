@@ -15,6 +15,8 @@
   function syncClock(iso) { if (iso) S.offset = new Date(iso).getTime() - Date.now(); }
   function pad(n) { return F.pad(n, S.state ? S.state.nomor_total : 0); }
   function tz() { return (S.info && S.info.studio.zona_waktu) || 'Asia/Jakarta'; }
+  function biaya(extra) { var i = S.state || S.info; return F.hargaTambahan(extra, i.harga_foto_tambahan, i.harga_bertingkat); }
+  function kiosk() { return !!((S.state && S.state.kiosk) || /[?&]kiosk=1/.test(location.search)); }
   function waStudio(text) {
     var no = S.info && S.info.studio.no_wa;
     return 'https://wa.me/' + (no || '') + '?text=' + encodeURIComponent(text || '');
@@ -79,7 +81,8 @@
   }
 
   function legal() {
-    return h('div.legal', 'Foto ini milik ', S.info ? S.info.studio.nama : 'studio', '. Pratinjau ber-watermark, bukan file akhir. ', h('a', { href: '/privasi', target: '_blank' }, 'Kebijakan privasi'));
+    return h('div.legal', 'Foto ini milik ', S.info ? S.info.studio.nama : 'studio', '. Pratinjau ber-watermark, bukan file akhir. ', h('a', { href: '/privasi', target: '_blank' }, 'Kebijakan privasi'),
+      S.info && S.info.label_produk ? h('div', { style: { marginTop: '6px' } }, 'Dibuat dengan ', h('a', { href: '/', target: '_blank' }, 'Galeri Seleksi')) : null);
   }
 
   // ---------- Router fase ----------
@@ -116,7 +119,8 @@
         h('div.facts',
           h('div', h('span.label', 'Kuota'), h('b', i.kuota + ' foto')),
           h('div', h('span.label', 'Waktu pilih'), h('b', i.durasi_pilih_menit + ' menit')),
-          i.maks_foto_tambahan > 0 ? h('div', h('span.label', 'Foto tambahan'), h('b', { style: { fontSize: '17px' } }, F.rupiah(i.harga_foto_tambahan)), h('span.small.muted', 'per foto, maks ' + i.maks_foto_tambahan)) : null),
+          i.maks_foto_tambahan > 0 ? h('div', h('span.label', 'Foto tambahan'), h('b', { style: { fontSize: '17px' } }, F.rupiah(i.harga_foto_tambahan)), h('span.small.muted', 'per foto, maks ' + i.maks_foto_tambahan),
+            (i.harga_bertingkat || []).length ? h('div.small.muted', i.harga_bertingkat.map(function (t) { return '+' + t.jumlah + ' foto ' + F.rupiah(t.harga); }).join(' · ')) : null) : null),
         h('div.alert', { style: { textAlign: 'left', marginBottom: '16px' } }, 'Timer ', h('b', i.durasi_pilih_menit + ' menit'), ' mulai berjalan saat kamu menekan "Mulai pilih" dan tetap berjalan walau halaman ditutup. Saat waktu habis, pilihanmu terkirim otomatis.'),
         btn)),
       legal()));
@@ -141,11 +145,27 @@
         h('p', auto ? 'Waktu memilih habis, jadi pilihanmu dikirim apa adanya ke studio.' : i.studio.nama + ' sudah menerima daftarmu. Simpan nomor ini kalau mau menanyakan foto tertentu.'),
         picked.length < i.kuota ? h('p', { style: { color: '#E9D8A6' } }, 'Kamu memilih ' + picked.length + ' dari kuota ' + i.kuota + ' foto. Studio akan menghubungi untuk langkah berikutnya.') : null,
         h('div.chips', picked.map(function (p) { return h('span.chip-num', pad(p.nomor)); })),
-        picked.length ? h('button.btn.btn-amber', { type: 'button', onclick: function () { UI.copy(selectionText(), 'Daftar pilihan tersalin'); } }, ic('salin'), 'Salin daftar nomor') : null,
-        i.studio.no_wa ? h('a.btn.btn-ghost-dark', { href: waStudio(selectionText()), target: '_blank', rel: 'noopener' }, ic('wa'), 'Kirim daftar ke WhatsApp studio') : null,
+        i.hasil_link ? h('a.btn', { href: i.hasil_link, target: '_blank', rel: 'noopener', style: { background: 'var(--mint)', color: 'var(--abyss)' } }, ic('unduh'), 'Hasil edit sudah siap — buka') : null,
+        tagihanBox(i),
+        kiosk() ? h('a.btn.btn-amber', { href: '/app#/kiosk' }, 'Selesai — kembalikan ke admin') : null,
+        picked.length && !kiosk() ? h('button.btn.btn-amber', { type: 'button', onclick: function () { UI.copy(selectionText(), 'Daftar pilihan tersalin'); } }, ic('salin'), 'Salin daftar nomor') : null,
+        i.studio.no_wa && !kiosk() ? h('a.btn.btn-ghost-dark', { href: waStudio(selectionText()), target: '_blank', rel: 'noopener' }, ic('wa'), 'Kirim daftar ke WhatsApp studio') : null,
         h('p.small', { style: { marginTop: '16px' } }, 'Mau ubah pilihan? Hubungi studio, mereka bisa membuka kuncinya.'));
     }
     root.appendChild(h('div', brandBar(), h('div.center-page', { style: { minHeight: 'calc(100dvh - 70px)' } }, box), legal()));
+  }
+
+  // F-35: tagihan foto tambahan + bayar online
+  function tagihanBox(i) {
+    var t = i.tagihan;
+    if (!t || !t.total) return null;
+    if (t.status_bayar === 'lunas') return h('p', { style: { color: '#94D2BD', fontWeight: 700 } }, 'Foto tambahan ' + F.rupiah(t.total) + ' sudah lunas' + (t.metode ? ' (' + t.metode + ')' : '') + '. Terima kasih!');
+    var b = i.bayar_online && !kiosk() ? h('button.btn.btn-amber', { type: 'button', onclick: function (e) {
+      var btn = e.currentTarget; btn.disabled = true;
+      api('POST', '/bayar').then(function (r) { location.href = r.url; }).catch(function (er) { UI.toast(er.message, true); btn.disabled = false; });
+    } }, 'Bayar ' + F.rupiah(t.total) + ' (QRIS / VA)') : null;
+    return h('div', { style: { background: 'rgba(255,255,255,.08)', borderRadius: '16px', padding: '14px', margin: '12px 0' } },
+      h('div', h('b', t.jumlah_foto + ' foto tambahan · ' + F.rupiah(t.total))), h('div.small', { style: { color: '#C9D3D5' } }, b ? 'Bayar online sekarang, atau di kasir.' : 'Bayar di kasir atau transfer sesuai arahan studio.'), b);
   }
 
   function actionMintaWaktu(dark) {
@@ -176,14 +196,18 @@
     [['semua', 'Semua'], ['dipilih', 'Dipilih'], ['belum', 'Belum dipilih']].forEach(function (t) {
       seg.appendChild(h('button', { type: 'button', role: 'tab', class: S.filter === t[0] ? 'on' : '', 'aria-selected': String(S.filter === t[0]), onclick: function () { S.filter = t[0]; renderGallery(); } }, t[1], ' · ', h('span', { 'data-count': t[0] })));
     });
-    var subSel = subs.length > 1 && i.tampil_nama_file ? h('select.select', { style: { width: 'auto', minHeight: '40px', borderRadius: '999px' }, 'aria-label': 'Subfolder', onchange: function (e) { S.sub = e.target.value; renderGallery(); } },
-      h('option', { value: '' }, 'Semua folder'), subs.map(function (s) { return h('option', { value: s, selected: S.sub === s }, s || '(utama)'); })) : null;
+    // F-11: subfolder sebagai tab (mis. per lokasi atau kamera)
+    var subSel = subs.length > 1 && i.tampil_nama_file ? h('div.seg.subtabs', { role: 'tablist', 'aria-label': 'Folder' },
+      [''].concat(subs).map(function (sf) {
+        var n = sf === '' ? i.fotos.length : i.fotos.filter(function (x) { return (x.subfolder || '') === sf; }).length;
+        return h('button', { type: 'button', role: 'tab', class: S.sub === sf ? 'on' : '', 'aria-selected': String(S.sub === sf), onclick: function () { S.sub = sf; renderGallery(); } }, (sf === '' ? 'Semua folder' : sf || 'Utama') + ' · ' + n);
+      })) : null;
     els.grid = h('div.photo-grid');
     var head = h('div.c-head',
       h('div.label', [i.jenis, i.jumlah_foto + ' foto', 'pilih ' + i.kuota].filter(Boolean).join(' · ')),
       h('h1.display-lg', i.judul),
       readOnly && !i.staff ? h('p.muted', 'Galeri ini hanya bisa dilihat.') : h('p.muted.small', { style: { margin: '6px 0 0' } }, 'Ketuk lingkaran untuk memilih · ketuk foto untuk melihat besar, menulis catatan, atau menyalin link.'));
-    root.appendChild(h('div', sticky, h('div.c-wrap', brandBar().firstChild, head, h('div.toolbar', seg, subSel), els.grid)));
+    root.appendChild(h('div', sticky, h('div.c-wrap', brandBar().firstChild, head, h('div.toolbar', seg, h('button.btn.btn-secondary.btn-sm', { type: 'button', onclick: function () { startCompare(null); } }, ic('banding'), 'Bandingkan')), subSel ? h('div.toolbar', subSel) : null, els.grid)));
     els.bar = h('div.selbar');
     if (!i.staff) root.appendChild(els.bar);
     root.appendChild(legal());
@@ -261,7 +285,7 @@
     var editable = canEdit();
     els.bar.appendChild(h('div.top',
       h('div', h('div.count', h('b', String(n)), ' / ' + i.kuota + ' dipilih'),
-        extra > 0 ? h('div.extra-cost', '+' + extra + ' foto tambahan · ' + F.rupiah(extra * i.harga_foto_tambahan)) : null),
+        extra > 0 ? h('div.extra-cost', '+' + extra + ' foto tambahan · ' + F.rupiah(biaya(extra))) : null),
       h('div.acts',
         h('button.btn.btn-amber.btn-sm', { type: 'button', disabled: !n, onclick: function () { UI.copy(selectionText(), n + ' pilihan tersalin'); } }, ic('salin'), 'Salin semua pilihan'),
         editable ? h('button.btn.btn-sm', { type: 'button', style: { background: '#fff', color: 'var(--abyss)' }, onclick: openSummary }, 'Kirim pilihan') : null)));
@@ -369,7 +393,7 @@
   function selectionText() {
     var i = S.state, p = picked();
     return F.selectionText({ nama: i.pelanggan, judul: i.judul, items: p, kuota: i.kuota, galleryUrl: galleryUrl(), total: i.nomor_total,
-      showName: i.tampil_nama_file, catatanUmum: i.catatan_umum, tambahan: Math.max(0, p.length - i.kuota), harga: i.harga_foto_tambahan });
+      showName: i.tampil_nama_file, catatanUmum: i.catatan_umum, tambahan: Math.max(0, p.length - i.kuota), harga: i.harga_foto_tambahan, total: biaya(Math.max(0, p.length - i.kuota)) });
   }
 
   // ---------- PL4: Layar penuh ----------
@@ -424,6 +448,7 @@
     el.appendChild(h('div.lb-top',
       h('div.row', { style: { gap: '10px', minWidth: 0, flexWrap: 'nowrap' } }, h('span.lb-no' + (f.dipilih ? '.sel' : ''), pad(f.nomor)), f.nama_file ? h('span.fname', f.nama_file) : null),
       h('div.row', { style: { gap: '8px' } },
+        h('button.icon-btn', { type: 'button', 'aria-label': 'Bandingkan dengan foto lain', title: 'Bandingkan', onclick: function () { startCompare(f.nomor); } }, ic('banding')),
         h('button.icon-btn', { type: 'button', 'aria-label': 'Perbesar', onclick: function () { stage.classList.toggle('zoomed'); } }, ic('zoom')),
         h('button.icon-btn', { type: 'button', 'aria-label': 'Tutup', onclick: function () { closeLb(); } }, ic('x')))));
     el.appendChild(stage);
@@ -446,6 +471,43 @@
     }
   }
 
+  // ---------- PL7: Bandingkan dua foto (F-26) ----------
+  function startCompare(a) {
+    closeLb();
+    var list = visible();
+    if (list.length < 2) { UI.toast('Butuh minimal 2 foto untuk dibandingkan', true); return; }
+    var A = a || list[0].nomor;
+    var idx = list.findIndex(function (f) { return f.nomor === A; });
+    var B = (list[(idx + 1) % list.length] || list[0]).nomor;
+    var el = h('div.lb.cmp', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Bandingkan foto' });
+    document.body.appendChild(el); document.body.style.overflow = 'hidden';
+    function key(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', key);
+    function close() { el.remove(); document.removeEventListener('keydown', key); document.body.style.overflow = ''; }
+    function side(n, setN) {
+      var f = find(n);
+      var pos = list.findIndex(function (x) { return x.nomor === n; });
+      var mv = function (d) { setN(list[(pos + d + list.length) % list.length].nomor); draw(); };
+      var pane = h('div.cmp-pane',
+        h('div.cmp-img', h('img', { src: f.preview, alt: 'Foto ' + pad(n), draggable: 'false', oncontextmenu: function (e) { e.preventDefault(); } }),
+          h('span.lb-no' + (f.dipilih ? '.sel' : ''), { style: { position: 'absolute', top: '8px', left: '8px' } }, pad(n))),
+        h('div.cmp-bar',
+          h('button.icon-btn', { type: 'button', 'aria-label': 'Foto sebelumnya', onclick: function () { mv(-1); } }, ic('kiri')),
+          canEdit() ? h('button.btn.btn-sm.' + (f.dipilih ? 'btn-amber' : 'btn-secondary'), { type: 'button', 'aria-pressed': String(!!f.dipilih), onclick: function () { toggle(n); setTimeout(draw, 50); } }, ic('check'), f.dipilih ? 'Dipilih' : 'Pilih') : null,
+          h('button.icon-btn', { type: 'button', 'aria-label': 'Foto berikutnya', onclick: function () { mv(1); } }, ic('kanan'))));
+      var sx = null;
+      pane.addEventListener('touchstart', function (e) { sx = e.touches.length === 1 ? e.touches[0].clientX : null; }, { passive: true });
+      pane.addEventListener('touchend', function (e) { if (sx === null) return; var dx = e.changedTouches[0].clientX - sx; sx = null; if (Math.abs(dx) > 50) mv(dx < 0 ? 1 : -1); });
+      return pane;
+    }
+    function draw() {
+      el.innerHTML = '';
+      el.appendChild(h('div.lb-top', h('b', 'Bandingkan ' + pad(A) + ' & ' + pad(B)), h('button.icon-btn', { type: 'button', 'aria-label': 'Tutup', onclick: close }, ic('x'))));
+      el.appendChild(h('div.cmp-wrap', side(A, function (v) { A = v; }), side(B, function (v) { B = v; })));
+    }
+    draw();
+  }
+
   // ---------- PL5: Ringkasan & kirim ----------
   function openSummary() {
     var i = S.state, p = picked();
@@ -459,8 +521,8 @@
           h('div.t', h('div.num', pad(f.nomor)), f.nama_file ? h('div.filename', f.nama_file) : null, f.catatan ? h('div.small.muted', '“' + f.catatan + '”') : null),
           f.is_tambahan ? h('span.badge.st-waktu_habis', 'Tambahan') : null);
       })),
-      extra > 0 ? h('div.sum-total', h('span', 'Foto tambahan ' + extra + ' × ' + F.rupiah(i.harga_foto_tambahan)), h('span', F.rupiah(extra * i.harga_foto_tambahan))) : null,
-      extra > 0 ? h('p.small.muted', 'Bayar foto tambahan di kasir atau transfer sesuai arahan studio.') : null,
+      extra > 0 ? h('div.sum-total', h('span', 'Foto tambahan ' + extra + ' foto'), h('span', F.rupiah(biaya(extra)))) : null,
+      extra > 0 ? h('p.small.muted', i.bayar_online ? 'Setelah dikirim, kamu bisa langsung bayar online (QRIS / virtual account) atau di kasir.' : 'Bayar foto tambahan di kasir atau transfer sesuai arahan studio.') : null,
       h('label.field', h('span', 'Catatan umum'), umum),
       h('p.small.muted', 'Setelah dikirim, pilihan terkunci. Hanya studio yang bisa membukanya lagi.'));
     var mdl = UI.modal({ title: 'Kirim ' + p.length + ' pilihan?', body: body, actions: [
@@ -468,7 +530,7 @@
       { label: 'Salin semua pilihan', cls: 'btn-amber', onClick: function () { saveUmum().then(function () { UI.copy(selectionText(), 'Daftar pilihan tersalin'); }); } },
       { label: 'Kirim pilihan', cls: 'btn-primary', onClick: function (close) {
         // Buka tab WhatsApp lebih dulu (sinkron dengan klik) agar tidak diblokir browser
-        var w = i.studio.no_wa ? window.open('about:blank', '_blank') : null;
+        var w = i.studio.no_wa && !kiosk() ? window.open('about:blank', '_blank') : null;
         S.submitting = true;
         saveUmum().then(function () { return api('POST', '/kirim'); }).then(function () {
           S.submitting = false; close();

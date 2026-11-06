@@ -33,6 +33,7 @@ function createApp() {
   });
   app.use(express.json({ limit: '4mb' }));
 
+  app.use('/api/webhooks', require('./routes/webhooks'));
   app.use('/api', require('./routes/studio'));
   app.use('/g/:token/api', require('./routes/client'));
   app.get('/media/:sesiId/:fotoId/:kind', media.handler);

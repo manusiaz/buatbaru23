@@ -10,6 +10,9 @@ const { randomToken, sha256, safeEqual } = require('../security');
 const { currentUser } = require('../auth');
 const { HttpError, bad, notFound, ah, str, int, parseCookies, setCookie } = require('../http');
 const { limit } = require('../ratelimit');
+const plans = require('../plans');
+const payment = require('../payment');
+const { decrypt } = require('../security');
 
 const r = express.Router({ mergeParams: true });
 const MAX_GAGAL = 5;
@@ -34,7 +37,8 @@ async function context(req) {
   if (c) authed = !!(await db.one('SELECT 1 FROM client_sessions WHERE token_hash=$1 AND sesi_id=$2 AND kedaluwarsa>now()', [sha256(c), sesi.id]));
   const user = await currentUser(req);
   const staff = !!(user && user.studio_id === sesi.studio_id);
-  return { sesi, studio, pel, authed, staff };
+  const tagihan = await db.one('SELECT jumlah_foto, total_rupiah, status_bayar, metode FROM tagihans WHERE sesi_id=$1', [sesi.id]);
+  return { sesi, studio, pel, authed, staff, tagihan };
 }
 
 function gate(ctx) {
@@ -64,8 +68,15 @@ function infoOut(ctx) {
     judul: s.judul, jenis: s.jenis, tanggal_sesi: s.tanggal_sesi, pelanggan: ctx.pel.nama,
     kuota: s.kuota, durasi_pilih_menit: s.durasi_pilih_menit, harga_foto_tambahan: s.harga_foto_tambahan,
     maks_foto_tambahan: s.maks_foto_tambahan, tenggat_link: s.tenggat_link, izin_catatan: s.izin_catatan,
-    tampil_nama_file: s.tampil_nama_file || ctx.staff,
-    fase: phase(s), perlu_pin: !ctx.authed && !ctx.staff, staff: ctx.staff,
+    tampil_nama_file: s.tampil_nama_file || (ctx.staff && !ctx.authed),
+    fase: phase(s), perlu_pin: !ctx.authed && !ctx.staff,
+    // staf yang membuka tanpa sesi pelanggan = pratinjau baca-saja; di kiosk staf memakai sesi pelanggan
+    staff: ctx.staff && !ctx.authed, kiosk: !!s.kiosk && ctx.authed,
+    harga_bertingkat: s.harga_bertingkat || [],
+    label_produk: plans.summary(ctx.studio).label_produk,
+    hasil_link: (ctx.authed || ctx.staff) && ['terkirim', 'selesai'].includes(s.status) ? s.hasil_link : null,
+    tagihan: (ctx.authed || ctx.staff) && ctx.tagihan ? { jumlah_foto: ctx.tagihan.jumlah_foto, total: Number(ctx.tagihan.total_rupiah), status_bayar: ctx.tagihan.status_bayar, metode: ctx.tagihan.metode } : null,
+    bayar_online: payment.enabled() && plans.has(ctx.studio, 'bayar_online'),
     staff_url: ctx.staff ? `/app#/galeri/${s.id}` : null,
     berakhir_pada: s.berakhir_pada, mulai_pilih_pada: s.mulai_pilih_pada, dikirim_pada: s.dikirim_pada,
     minta_waktu_pada: s.minta_waktu_pada, catatan_umum: ctx.authed || ctx.staff ? s.catatan_umum : null,
@@ -124,7 +135,7 @@ r.get('/state', ah(async (req, res) => {
   gate(ctx);
   const s = ctx.sesi;
   const info = infoOut(ctx);
-  const hidden = info.fase === 'sebelum_mulai' || info.fase === 'menyiapkan' || (info.fase === 'kedaluwarsa' && !ctx.staff);
+  const hidden = info.fase === 'sebelum_mulai' || info.fase === 'menyiapkan' || (info.fase === 'kedaluwarsa' && !info.staff);
   const fotos = hidden ? [] : await db.many(`SELECT f.id, f.nomor, f.nama_file, f.path_subfolder, f.nama_kembar, f.thumb_siap,
       p.catatan, p.is_tambahan, (p.foto_id IS NOT NULL) AS dipilih, p.dipilih_pada
     FROM fotos f LEFT JOIN pilihans p ON p.foto_id=f.id AND p.sesi_id=f.sesi_id
@@ -216,7 +227,7 @@ r.post('/pilih', limit('pilih', 600, 60), ah(async (req, res) => {
     }
     const t = await S.recomputeTagihan(c, s);
     const ext = await c.query('SELECT f.nomor FROM pilihans p JOIN fotos f ON f.id=p.foto_id WHERE p.sesi_id=$1 AND p.is_tambahan ORDER BY f.nomor', [s.id]);
-    return { ok: true, jumlah: t.jumlah, tambahan: t.tambahan, total_rupiah: t.tambahan * s.harga_foto_tambahan,
+    return { ok: true, jumlah: t.jumlah, tambahan: t.tambahan, total_rupiah: t.total,
       tambahan_nomor: ext.rows.map((x) => x.nomor), berakhir_pada: s.berakhir_pada, fase: 'memilih' };
   });
   res.json(out);
@@ -262,6 +273,30 @@ r.post('/minta-waktu', limit('minta', 10, 60 * 60), ah(async (req, res) => {
   await S.logEvent(null, s.id, 'minta_waktu', 'pelanggan', { fase: phase(s) });
   await notify(s.studio_id, s.id, 'minta_waktu', `${s.judul} minta tambah waktu`);
   res.json({ ok: true });
+}));
+
+// F-35: bayar foto tambahan online (QRIS / VA) setelah pilihan terkirim
+r.post('/bayar', limit('bayar', 20, 3600), ah(async (req, res) => {
+  const ctx = await context(req);
+  if (!ctx.authed) throw new HttpError(401, 'Masukkan PIN dulu.');
+  const s = ctx.sesi;
+  if (!['terkirim', 'selesai'].includes(s.status)) throw bad('Kirim pilihan dulu sebelum membayar.');
+  if (!(payment.enabled() && plans.has(ctx.studio, 'bayar_online'))) throw bad('Pembayaran online tidak tersedia. Bayar di kasir atau transfer.');
+  const t = await db.one('SELECT * FROM tagihans WHERE sesi_id=$1', [s.id]);
+  if (!t || Number(t.total_rupiah) <= 0) throw bad('Tidak ada tagihan foto tambahan.');
+  if (t.status_bayar === 'lunas') throw bad('Tagihan sudah lunas.');
+  if (t.payment_url && Number(t.payment_total) === Number(t.total_rupiah)) return res.json({ url: t.payment_url });
+  const orderId = `GS-T-${s.id}-${Date.now()}`;
+  const amount = Number(t.total_rupiah);
+  let snap;
+  try {
+    snap = await payment.createSnap({ orderId, amount,
+      items: [{ id: `tambahan-${s.id}`, name: `${t.jumlah_foto} foto tambahan · ${s.judul}`.slice(0, 50), price: amount, quantity: 1 }],
+      customer: { first_name: ctx.pel.nama, phone: ctx.pel.no_wa || undefined }, finishUrl: `${config.baseUrl}/g/${decrypt(s.token_enc)}` });
+  } catch (e) { throw bad(e.message); }
+  await db.q('UPDATE tagihans SET order_id=$2, payment_url=$3, payment_total=$4, diubah_pada=now() WHERE sesi_id=$1', [s.id, orderId, snap.url, amount]);
+  await S.logEvent(null, s.id, 'bayar_dibuat', 'pelanggan', { total: amount });
+  res.json({ url: snap.url });
 }));
 
 module.exports = r;

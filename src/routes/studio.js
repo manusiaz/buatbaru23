@@ -11,9 +11,13 @@ const images = require('../images');
 const S = require('../sesi');
 const F = require('../../public/shared/format');
 const { randomToken, sha256, encrypt, decrypt, randomPin } = require('../security');
-const { hashPassword, checkPassword, createLogin, destroyLogin, currentUser, requireUser, can } = require('../auth');
-const { HttpError, bad, forbidden, notFound, ah, str, int, bool } = require('../http');
+const { hashPassword, checkPassword, createLogin, destroyLogin, currentUser, requireUser, requireSuperadmin, can } = require('../auth');
+const QRCode = require('qrcode');
+const { HttpError, bad, forbidden, notFound, ah, str, int, bool, setCookie } = require('../http');
 const { limit } = require('../ratelimit');
+const plans = require('../plans');
+const wa = require('../wa');
+const payment = require('../payment');
 
 const r = express.Router();
 
@@ -163,6 +167,11 @@ r.get('/me', ah(async (req, res) => {
     izin: Object.fromEntries(['studio.edit', 'tim.kelola', 'paket.kelola', 'paket.lihat', 'sesi.kelola', 'sesi.hapus', 'tagihan.kelola', 'editor.kerja'].map((p) => [p, can(req.user, p)])),
     notif_belum_dibaca: unread.n,
     pilihan_baru: masuk.n,
+    superadmin: !!req.user.superadmin,
+    cabang_id: req.user.cabang_id,
+    cabangs: await db.many('SELECT id, nama FROM cabangs WHERE studio_id=$1 AND NOT arsip ORDER BY nama', [req.user.studio_id]),
+    langganan: plans.summary(st),
+    integrasi: { wa_api: wa.configured(st), payment: payment.enabled(), drive_sa: !!drive.serviceAccountEmail() },
   });
 }));
 
@@ -212,6 +221,17 @@ r.put('/studio', requireUser('studio.edit'), ah(async (req, res) => {
     template_wa=$9, slug=COALESCE($10, slug) WHERE id=$1`, [req.user.studio_id, nama, warna, b.no_wa ? normWa(b.no_wa) : null, zona,
     str(b.watermark, { max: 60 }) || null, int(b.retensi_hari, { min: 1, max: 365, def: 30, name: 'Retensi' }), fmt,
     str(b.template_wa, { max: 1000 }) || null, slug]);
+  if (b.wa_otomatis !== undefined || b.template_hasil !== undefined) {
+    await db.q('UPDATE studios SET wa_otomatis=COALESCE($2, wa_otomatis), template_hasil=$3 WHERE id=$1',
+      [req.user.studio_id, b.wa_otomatis === undefined ? null : bool(b.wa_otomatis), str(b.template_hasil, { max: 1000 }) || null]);
+  }
+  if (b.wa_phone_number_id !== undefined) {
+    const pid = str(b.wa_phone_number_id, { max: 40 });
+    if (pid && !/^\d+$/.test(pid)) throw bad('Phone number ID WhatsApp harus angka.');
+    await db.q('UPDATE studios SET wa_phone_number_id=$2 WHERE id=$1', [req.user.studio_id, pid || null]);
+    if (b.wa_token) await db.q('UPDATE studios SET wa_token_enc=$2 WHERE id=$1', [req.user.studio_id, encrypt(String(b.wa_token).trim())]);
+    if (!pid) await db.q('UPDATE studios SET wa_token_enc=NULL WHERE id=$1', [req.user.studio_id]);
+  }
   res.json({ ok: true });
 }));
 r.post('/studio/logo', requireUser('studio.edit'), ah(async (req, res) => {
@@ -233,7 +253,7 @@ r.post('/studio/logo', requireUser('studio.edit'), ah(async (req, res) => {
 
 // ---------- Tim ----------
 r.get('/tim', requireUser('sesi.lihat'), ah(async (req, res) => {
-  const users = await db.many('SELECT id, nama, email, peran, aktif, dibuat_pada FROM users WHERE studio_id=$1 ORDER BY id', [req.user.studio_id]);
+  const users = await db.many('SELECT id, nama, email, peran, aktif, cabang_id, dibuat_pada FROM users WHERE studio_id=$1 ORDER BY id', [req.user.studio_id]);
   const invites = can(req.user, 'tim.kelola')
     ? await db.many('SELECT id, email, peran, kedaluwarsa FROM invites WHERE studio_id=$1 AND dipakai_pada IS NULL AND kedaluwarsa>now() ORDER BY id DESC', [req.user.studio_id])
     : [];
@@ -244,6 +264,7 @@ r.post('/tim/undang', requireUser('tim.kelola'), ah(async (req, res) => {
   if (!EMAIL_RE.test(email)) throw bad('Email tidak valid.');
   const peran = ['admin', 'editor'].includes(req.body.peran) ? req.body.peran : 'admin';
   if (await db.one('SELECT 1 FROM users WHERE email=$1', [email])) throw bad('Email ini sudah punya akun.');
+  await plans.checkUserLimit(await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]));
   const token = randomToken(24);
   await db.q(`INSERT INTO invites(studio_id, email, peran, token_hash, kedaluwarsa) VALUES ($1,$2,$3,$4, now()+interval '7 days')`,
     [req.user.studio_id, email, peran, sha256(token)]);
@@ -259,7 +280,12 @@ r.put('/tim/:id', requireUser('tim.kelola'), ah(async (req, res) => {
   if (u.peran === 'owner') throw bad('Peran owner tidak bisa diubah di sini.');
   const peran = ['admin', 'editor'].includes(req.body.peran) ? req.body.peran : u.peran;
   const aktif = req.body.aktif === undefined ? u.aktif : bool(req.body.aktif);
-  await db.q('UPDATE users SET peran=$2, aktif=$3 WHERE id=$1', [u.id, peran, aktif]);
+  let cabangId = u.cabang_id;
+  if (req.body.cabang_id !== undefined) {
+    cabangId = req.body.cabang_id ? parseInt(req.body.cabang_id, 10) : null;
+    if (cabangId && !(await db.one('SELECT 1 FROM cabangs WHERE id=$1 AND studio_id=$2', [cabangId, req.user.studio_id]))) throw bad('Cabang tidak ditemukan.');
+  }
+  await db.q('UPDATE users SET peran=$2, aktif=$3, cabang_id=$4 WHERE id=$1', [u.id, peran, aktif, cabangId]);
   if (!aktif) await db.q('DELETE FROM user_sessions WHERE user_id=$1', [u.id]);
   res.json({ ok: true });
 }));
@@ -273,21 +299,28 @@ function paketIn(b) {
     masa_aktif_jam: int(b.masa_aktif_jam, { min: 1, max: 24 * 365, def: 168, name: 'Masa aktif' }),
     harga_foto_tambahan: int(b.harga_foto_tambahan, { min: 0, max: 100000000, def: 0, name: 'Harga foto tambahan' }),
     maks_foto_tambahan: int(b.maks_foto_tambahan, { min: 0, max: 5000, def: 0, name: 'Batas foto tambahan' }),
+    harga_bertingkat: tiersIn(b.harga_bertingkat),
   };
+}
+// F-36: [{jumlah, harga}] atau teks "5=100000, 10=180000"
+function tiersIn(v) {
+  const arr = typeof v === 'string' ? F.parseTiers(v) : Array.isArray(v) ? v : [];
+  return arr.slice(0, 10).map((t) => ({ jumlah: int(t.jumlah, { min: 1, max: 5000, name: 'Jumlah paket tambahan' }), harga: int(t.harga, { min: 0, max: 1e9, name: 'Harga paket tambahan' }) }))
+    .sort((a, b) => a.jumlah - b.jumlah);
 }
 r.get('/pakets', requireUser('sesi.lihat'), ah(async (req, res) => {
   res.json(await db.many('SELECT * FROM pakets WHERE studio_id=$1 AND NOT arsip ORDER BY nama', [req.user.studio_id]));
 }));
 r.post('/pakets', requireUser('paket.kelola'), ah(async (req, res) => {
   const p = paketIn(req.body);
-  const row = await db.one(`INSERT INTO pakets(studio_id, nama, kuota, durasi_pilih_menit, masa_aktif_jam, harga_foto_tambahan, maks_foto_tambahan)
-    VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [req.user.studio_id, p.nama, p.kuota, p.durasi_pilih_menit, p.masa_aktif_jam, p.harga_foto_tambahan, p.maks_foto_tambahan]);
+  const row = await db.one(`INSERT INTO pakets(studio_id, nama, kuota, durasi_pilih_menit, masa_aktif_jam, harga_foto_tambahan, maks_foto_tambahan, harga_bertingkat)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [req.user.studio_id, p.nama, p.kuota, p.durasi_pilih_menit, p.masa_aktif_jam, p.harga_foto_tambahan, p.maks_foto_tambahan, JSON.stringify(p.harga_bertingkat)]);
   res.json(row);
 }));
 r.put('/pakets/:id', requireUser('paket.kelola'), ah(async (req, res) => {
   const p = paketIn(req.body);
-  const row = await db.one(`UPDATE pakets SET nama=$3, kuota=$4, durasi_pilih_menit=$5, masa_aktif_jam=$6, harga_foto_tambahan=$7, maks_foto_tambahan=$8
-    WHERE id=$1 AND studio_id=$2 RETURNING *`, [req.params.id, req.user.studio_id, p.nama, p.kuota, p.durasi_pilih_menit, p.masa_aktif_jam, p.harga_foto_tambahan, p.maks_foto_tambahan]);
+  const row = await db.one(`UPDATE pakets SET nama=$3, kuota=$4, durasi_pilih_menit=$5, masa_aktif_jam=$6, harga_foto_tambahan=$7, maks_foto_tambahan=$8, harga_bertingkat=$9
+    WHERE id=$1 AND studio_id=$2 RETURNING *`, [req.params.id, req.user.studio_id, p.nama, p.kuota, p.durasi_pilih_menit, p.masa_aktif_jam, p.harga_foto_tambahan, p.maks_foto_tambahan, JSON.stringify(p.harga_bertingkat)]);
   if (!row) throw notFound();
   res.json(row);
 }));
@@ -351,11 +384,12 @@ async function loadSesi(req, id) {
   const sesiId = parseInt(id, 10);
   if (!Number.isInteger(sesiId)) throw notFound();
   await S.enforce(sesiId);
-  const extra = req.user.peran === 'editor' ? ' AND (s.editor_id = $3 OR s.editor_id IS NULL)' : '';
   const params = [sesiId, req.user.studio_id];
-  if (extra) params.push(req.user.id);
-  const s = await db.one(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, pk.nama AS paket_nama
-    FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id LEFT JOIN pakets pk ON pk.id=s.paket_id
+  let extra = '';
+  if (req.user.peran === 'editor') { params.push(req.user.id); extra += ` AND (s.editor_id = $${params.length} OR s.editor_id IS NULL)`; }
+  if (req.user.cabang_id) { params.push(req.user.cabang_id); extra += ` AND s.cabang_id = $${params.length}`; }
+  const s = await db.one(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, pk.nama AS paket_nama, cb.nama AS cabang_nama
+    FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id LEFT JOIN pakets pk ON pk.id=s.paket_id LEFT JOIN cabangs cb ON cb.id=s.cabang_id
     WHERE s.id=$1 AND s.studio_id=$2${extra}`, params);
   if (!s) throw notFound('Sesi tidak ditemukan.');
   return s;
@@ -374,6 +408,8 @@ function sesiRow(s) {
     mulai_pilih_pada: s.mulai_pilih_pada, berakhir_pada: s.berakhir_pada, dikirim_pada: s.dikirim_pada, dikirim_otomatis: s.dikirim_otomatis,
     minta_waktu_pada: s.minta_waktu_pada, catatan_umum: s.catatan_umum, editor_id: s.editor_id, editor_status: s.editor_status,
     dibuat_pada: s.dibuat_pada, jumlah_foto: s.jumlah_foto, jumlah_pilihan: s.jumlah_pilihan, cover: s.cover,
+    cabang_id: s.cabang_id, cabang_nama: s.cabang_nama, harga_bertingkat: s.harga_bertingkat || [],
+    hasil_link: s.hasil_link, hasil_dikirim_pada: s.hasil_dikirim_pada, terpilih_status: s.terpilih_status, terpilih_info: s.terpilih_info,
   };
 }
 
@@ -381,6 +417,9 @@ r.get('/sesis', requireUser('sesi.lihat'), ah(async (req, res) => {
   const params = [req.user.studio_id];
   let where = 's.studio_id=$1';
   if (req.user.peran === 'editor') { params.push(req.user.id); where += ` AND (s.editor_id=$${params.length} OR s.editor_id IS NULL)`; }
+  if (req.user.cabang_id) { params.push(req.user.cabang_id); where += ` AND s.cabang_id=$${params.length}`; }
+  else if (req.query.cabang) { params.push(parseInt(req.query.cabang, 10) || 0); where += ` AND s.cabang_id=$${params.length}`; }
+  if (req.query.hari_ini === '1') where += " AND (s.tanggal_sesi = (now() AT TIME ZONE 'Asia/Jakarta')::date OR s.dibuat_pada > now() - interval '18 hours') AND s.status IN ('siap','dibuka','memilih')";
   if (req.query.q) { params.push(`%${String(req.query.q).slice(0, 80)}%`); where += ` AND (s.judul ILIKE $${params.length} OR p.nama ILIKE $${params.length} OR p.no_wa ILIKE $${params.length})`; }
   const st = String(req.query.status || '');
   if (st === 'waktu_habis') where += " AND s.status='terkirim' AND s.dikirim_otomatis";
@@ -390,11 +429,11 @@ r.get('/sesis', requireUser('sesi.lihat'), ah(async (req, res) => {
   else if (st) { params.push(st); where += ` AND s.status=$${params.length}`; }
   const order = { tenggat: 's.tenggat_link ASC NULLS LAST', nama: 's.judul ASC' }[req.query.urut] || 's.dibuat_pada DESC';
   const lim = int(req.query.limit, { min: 1, max: 500, def: 200 });
-  const rows = await db.many(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, pk.nama AS paket_nama,
+  const rows = await db.many(`SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa, pk.nama AS paket_nama, cb.nama AS cabang_nama,
       (SELECT count(*)::int FROM fotos f WHERE f.sesi_id=s.id AND NOT f.dihapus) AS jumlah_foto,
       (SELECT count(*)::int FROM pilihans x WHERE x.sesi_id=s.id) AS jumlah_pilihan,
       (SELECT f.id FROM fotos f WHERE f.sesi_id=s.id AND NOT f.dihapus AND f.thumb_siap ORDER BY f.nomor LIMIT 1) AS cover_id
-    FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id LEFT JOIN pakets pk ON pk.id=s.paket_id
+    FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id LEFT JOIN pakets pk ON pk.id=s.paket_id LEFT JOIN cabangs cb ON cb.id=s.cabang_id
     WHERE ${where} ORDER BY ${order} LIMIT ${lim}`, params);
   // Terapkan aturan waktu secara malas untuk baris yang kedaluwarsa
   const stale = rows.filter((s) => (s.status === 'memilih' && s.berakhir_pada && new Date(s.berakhir_pada) < Date.now() - S.GRACE_MS)
@@ -420,41 +459,69 @@ function waText(studio, s, link, pin) {
   }[k] ?? m)).replace(/\n{3,}/g, '\n\n').trim();
 }
 
-r.post('/sesis', requireUser('sesi.kelola'), ah(async (req, res) => {
-  const b = req.body;
+// Buat satu sesi di dalam transaksi (dipakai form & CSV massal)
+async function createSesiIn(c, user, studio, b) {
   const pelangganNama = str(b.pelanggan_nama, { required: true, max: 80, name: 'Nama pelanggan' });
   const wa = b.pelanggan_wa ? normWa(b.pelanggan_wa) : null;
   let paket = null;
   if (b.paket_id) {
-    paket = await db.one('SELECT * FROM pakets WHERE id=$1 AND studio_id=$2', [b.paket_id, req.user.studio_id]);
+    paket = (await c.query('SELECT * FROM pakets WHERE id=$1 AND studio_id=$2', [b.paket_id, studio.id])).rows[0];
     if (!paket) throw bad('Paket tidak ditemukan.');
   }
   // F-04: nilai paket disalin ke sesi dan boleh diubah per sesi
-  const v = paketIn({ ...(paket || {}), nama: (paket && paket.nama) || 'Kustom', ...pick(b, ['kuota', 'durasi_pilih_menit', 'masa_aktif_jam', 'harga_foto_tambahan', 'maks_foto_tambahan']) });
+  const v = paketIn({ kuota: 10, ...(paket || {}), nama: (paket && paket.nama) || 'Kustom', ...pick(b, ['kuota', 'durasi_pilih_menit', 'masa_aktif_jam', 'harga_foto_tambahan', 'maks_foto_tambahan', 'harga_bertingkat']) });
   const src = sourceFromBody(b);
   const pin = b.pin ? String(b.pin) : randomPin(6);
   if (!/^\d{4,6}$/.test(pin)) throw bad('PIN harus 4–6 digit angka.');
+  let cabangId = b.cabang_id ? parseInt(b.cabang_id, 10) : (user.cabang_id || null);
+  if (user.cabang_id && cabangId !== user.cabang_id) throw forbidden('Kamu hanya bisa membuat sesi untuk cabangmu.');
+  if (cabangId && !(await c.query('SELECT 1 FROM cabangs WHERE id=$1 AND studio_id=$2', [cabangId, studio.id])).rowCount) throw bad('Cabang tidak ditemukan.');
+  await plans.consumeSession(c, studio, 1);
   const token = randomToken(16); // 128 bit
   const judul = str(b.judul, { max: 120 }) || pelangganNama;
-  const row = await db.tx(async (c) => {
-    let pel = wa ? (await c.query('SELECT id FROM pelanggans WHERE studio_id=$1 AND no_wa=$2 AND nama=$3', [req.user.studio_id, wa, pelangganNama])).rows[0] : null;
-    if (!pel) pel = (await c.query('INSERT INTO pelanggans(studio_id, nama, no_wa) VALUES ($1,$2,$3) RETURNING id', [req.user.studio_id, pelangganNama, wa])).rows[0];
-    const s = (await c.query(`INSERT INTO sesis(studio_id, pelanggan_id, paket_id, judul, jenis, tanggal_sesi, kuota, durasi_pilih_menit, masa_aktif_jam,
-        harga_foto_tambahan, maks_foto_tambahan, tampil_nama_file, izin_catatan, sumber, drive_folder_id, resource_key, urutan,
-        token_hash, token_enc, pin_hash, pin_enc, tenggat_link, dibuat_oleh, sinkron_status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21, now() + ($22 || ' hours')::interval, $23, 'menunggu') RETURNING *`,
-    [req.user.studio_id, pel.id, paket ? paket.id : null, judul, str(b.jenis, { max: 60 }) || (paket && paket.nama) || null,
-      /^\d{4}-\d{2}-\d{2}$/.test(b.tanggal_sesi || '') ? b.tanggal_sesi : null,
-      v.kuota, v.durasi_pilih_menit, v.masa_aktif_jam, v.harga_foto_tambahan, v.maks_foto_tambahan,
-      b.tampil_nama_file === undefined ? true : bool(b.tampil_nama_file), b.izin_catatan === undefined ? true : bool(b.izin_catatan),
-      src.sumber, src.folderId, src.resourceKey, b.urutan === 'waktu' ? 'waktu' : 'nama',
-      sha256(token), encrypt(token), sha256(`pin:${pin}`), encrypt(pin), String(v.masa_aktif_jam), req.user.id])).rows[0];
-    await c.query('INSERT INTO tagihans(sesi_id) VALUES ($1)', [s.id]);
-    await S.logEvent(c, s.id, 'dibuat', req.user.nama, { sumber: src.sumber });
-    return s;
-  });
-  sync.startSync(row.id, req.user.nama);
-  res.json({ id: row.id, link: galleryUrl(token), pin });
+  let pel = wa ? (await c.query('SELECT id FROM pelanggans WHERE studio_id=$1 AND no_wa=$2 AND nama=$3', [studio.id, wa, pelangganNama])).rows[0] : null;
+  if (!pel) pel = (await c.query('INSERT INTO pelanggans(studio_id, nama, no_wa) VALUES ($1,$2,$3) RETURNING id', [studio.id, pelangganNama, wa])).rows[0];
+  const row = (await c.query(`INSERT INTO sesis(studio_id, pelanggan_id, paket_id, judul, jenis, tanggal_sesi, kuota, durasi_pilih_menit, masa_aktif_jam,
+      harga_foto_tambahan, maks_foto_tambahan, tampil_nama_file, izin_catatan, sumber, drive_folder_id, resource_key, urutan,
+      token_hash, token_enc, pin_hash, pin_enc, tenggat_link, dibuat_oleh, sinkron_status, cabang_id, harga_bertingkat)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21, now() + ($22 || ' hours')::interval, $23, 'menunggu', $24, $25) RETURNING *`,
+  [studio.id, pel.id, paket ? paket.id : null, judul, str(b.jenis, { max: 60 }) || (paket && paket.nama) || null,
+    /^\d{4}-\d{2}-\d{2}$/.test(b.tanggal_sesi || '') ? b.tanggal_sesi : null,
+    v.kuota, v.durasi_pilih_menit, v.masa_aktif_jam, v.harga_foto_tambahan, v.maks_foto_tambahan,
+    b.tampil_nama_file === undefined ? true : bool(b.tampil_nama_file), b.izin_catatan === undefined ? true : bool(b.izin_catatan),
+    src.sumber, src.folderId, src.resourceKey, b.urutan === 'waktu' ? 'waktu' : 'nama',
+    sha256(token), encrypt(token), sha256(`pin:${pin}`), encrypt(pin), String(v.masa_aktif_jam), user.id, cabangId,
+    JSON.stringify(v.harga_bertingkat)])).rows[0];
+  await c.query('INSERT INTO tagihans(sesi_id) VALUES ($1)', [row.id]);
+  await S.logEvent(c, row.id, 'dibuat', user.nama, { sumber: src.sumber });
+  return { row, token, pin, pelangganNama, wa };
+}
+
+// F-16: kirim link otomatis lewat WhatsApp Business API bila diaktifkan
+async function autoSendWa(studio, row, token, pin, aktor) {
+  if (!studio.wa_otomatis || !plans.has(studio, 'wa_api') || !wa.configured(studio)) return null;
+  const s = await db.one('SELECT s.*, p.nama AS pelanggan_nama, p.no_wa AS pelanggan_wa FROM sesis s JOIN pelanggans p ON p.id=s.pelanggan_id WHERE s.id=$1', [row.id]);
+  if (!s.pelanggan_wa) return null;
+  return sendLinkWa(studio, s, token, pin, aktor).catch((e) => ({ error: e.message }));
+}
+async function sendLinkWa(studio, s, token, pin, aktor) {
+  const link = galleryUrl(token);
+  const text = waText(studio, s, link, pin);
+  const tz = studio.zona_waktu || 'Asia/Jakarta';
+  const tenggat = s.tenggat_link ? new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short', timeZone: tz }).format(new Date(s.tenggat_link)) : '-';
+  const out = await wa.send(studio, { sesiId: s.id, to: s.pelanggan_wa, jenis: 'link',
+    template: config.waTemplateLink ? { name: config.waTemplateLink, params: [s.pelanggan_nama, studio.nama, link, pin, String(s.kuota), tenggat] } : null, text });
+  await db.q('UPDATE sesis SET link_dikirim_pada=COALESCE(link_dikirim_pada, now()) WHERE id=$1', [s.id]);
+  await S.logEvent(null, s.id, 'link_dikirim', aktor, { lewat: 'whatsapp_api' });
+  return out;
+}
+
+r.post('/sesis', requireUser('sesi.kelola'), ah(async (req, res) => {
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
+  const out = await db.tx((c) => createSesiIn(c, req.user, studio, req.body));
+  sync.startSync(out.row.id, req.user.nama);
+  const waRes = await autoSendWa(studio, out.row, out.token, out.pin, req.user.nama);
+  res.json({ id: out.row.id, link: galleryUrl(out.token), pin: out.pin, wa: waRes });
 }));
 
 function pick(o, keys) {
@@ -497,18 +564,19 @@ r.put('/sesis/:id', requireUser('sesi.kelola'), ah(async (req, res) => {
   const s = await loadSesi(req, req.params.id);
   const b = req.body;
   const v = paketIn({ nama: 'x', ...pick(s, ['kuota', 'durasi_pilih_menit', 'masa_aktif_jam', 'harga_foto_tambahan', 'maks_foto_tambahan']),
-    ...pick(b, ['kuota', 'durasi_pilih_menit', 'harga_foto_tambahan', 'maks_foto_tambahan']) });
+    harga_bertingkat: s.harga_bertingkat, ...pick(b, ['kuota', 'durasi_pilih_menit', 'harga_foto_tambahan', 'maks_foto_tambahan', 'harga_bertingkat']) });
   const judul = str(b.judul ?? s.judul, { required: true, max: 120, name: 'Judul' });
   await db.tx(async (c) => {
     await c.query(`UPDATE sesis SET judul=$2, jenis=$3, kuota=$4, durasi_pilih_menit=$5, harga_foto_tambahan=$6, maks_foto_tambahan=$7,
-      tampil_nama_file=$8, izin_catatan=$9 WHERE id=$1`,
+      tampil_nama_file=$8, izin_catatan=$9, harga_bertingkat=$10 WHERE id=$1`,
     [s.id, judul, str(b.jenis ?? s.jenis, { max: 60 }) || null, v.kuota, v.durasi_pilih_menit, v.harga_foto_tambahan, v.maks_foto_tambahan,
-      b.tampil_nama_file === undefined ? s.tampil_nama_file : bool(b.tampil_nama_file), b.izin_catatan === undefined ? s.izin_catatan : bool(b.izin_catatan)]);
+      b.tampil_nama_file === undefined ? s.tampil_nama_file : bool(b.tampil_nama_file), b.izin_catatan === undefined ? s.izin_catatan : bool(b.izin_catatan),
+      JSON.stringify(v.harga_bertingkat)]);
     if (b.pelanggan_nama || b.pelanggan_wa !== undefined) {
       await c.query('UPDATE pelanggans SET nama=COALESCE($2,nama), no_wa=$3 WHERE id=$1',
         [s.pelanggan_id, str(b.pelanggan_nama, { max: 80 }) || null, b.pelanggan_wa ? normWa(b.pelanggan_wa) : null]);
     }
-    await S.recomputeTagihan(c, { ...s, kuota: v.kuota, harga_foto_tambahan: v.harga_foto_tambahan });
+    await S.recomputeTagihan(c, { ...s, kuota: v.kuota, harga_foto_tambahan: v.harga_foto_tambahan, harga_bertingkat: v.harga_bertingkat });
     await S.logEvent(c, s.id, 'ubah', req.user.nama, null);
   });
   res.json({ ok: true });
@@ -682,6 +750,332 @@ r.get('/notifikasi', ah(async (req, res) => {
 r.post('/notifikasi/baca', ah(async (req, res) => {
   await db.q('UPDATE notifikasis SET dibaca=true WHERE studio_id=$1 AND NOT dibaca', [req.user.studio_id]);
   res.json({ ok: true });
+}));
+
+// ======================= V1 / V2 =======================
+
+// ---------- Cabang (F-05) ----------
+r.get('/cabangs', ah(async (req, res) => {
+  res.json(await db.many('SELECT id, nama, alamat, no_wa FROM cabangs WHERE studio_id=$1 AND NOT arsip ORDER BY nama', [req.user.studio_id]));
+}));
+r.post('/cabangs', requireUser('studio.edit'), ah(async (req, res) => {
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
+  plans.requireFeature(studio, 'multi_cabang');
+  const row = await db.one('INSERT INTO cabangs(studio_id, nama, alamat, no_wa) VALUES ($1,$2,$3,$4) RETURNING *',
+    [studio.id, str(req.body.nama, { required: true, max: 80, name: 'Nama cabang' }), str(req.body.alamat, { max: 200 }) || null, req.body.no_wa ? normWa(req.body.no_wa) : null]);
+  res.json(row);
+}));
+r.put('/cabangs/:id', requireUser('studio.edit'), ah(async (req, res) => {
+  const row = await db.one('UPDATE cabangs SET nama=$3, alamat=$4, no_wa=$5 WHERE id=$1 AND studio_id=$2 RETURNING *',
+    [req.params.id, req.user.studio_id, str(req.body.nama, { required: true, max: 80, name: 'Nama cabang' }), str(req.body.alamat, { max: 200 }) || null, req.body.no_wa ? normWa(req.body.no_wa) : null]);
+  if (!row) throw notFound();
+  res.json(row);
+}));
+r.delete('/cabangs/:id', requireUser('studio.edit'), ah(async (req, res) => {
+  await db.q('UPDATE cabangs SET arsip=true WHERE id=$1 AND studio_id=$2', [req.params.id, req.user.studio_id]);
+  await db.q('UPDATE users SET cabang_id=NULL WHERE cabang_id=$1 AND studio_id=$2', [req.params.id, req.user.studio_id]);
+  res.json({ ok: true });
+}));
+
+// ---------- QR code sesi (F-17) ----------
+r.get('/sesis/:id/qr.svg', requireUser('sesi.kelola'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  const svg = await QRCode.toString(galleryUrl(decrypt(s.token_enc)), { type: 'svg', margin: 1, errorCorrectionLevel: 'M', color: { dark: '#001219', light: '#ffffff' } });
+  res.set('Content-Type', 'image/svg+xml');
+  res.set('Cache-Control', 'private, no-store');
+  if (req.query.unduh) res.set('Content-Disposition', `attachment; filename="qr-${slugify(s.judul)}.svg"`);
+  res.send(svg);
+}));
+
+// ---------- WhatsApp API (F-16) ----------
+r.post('/sesis/:id/wa', requireUser('sesi.kelola'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [s.studio_id]);
+  plans.requireFeature(studio, 'wa_api');
+  if (!wa.configured(studio)) throw bad('WhatsApp API belum dikonfigurasi. Isi di Pengaturan › WhatsApp.');
+  try { await sendLinkWa(studio, s, decrypt(s.token_enc), decrypt(s.pin_enc), req.user.nama); } catch (e) { throw bad(e.message); }
+  res.json({ ok: true });
+}));
+
+// ---------- Hasil akhir (F-43) ----------
+function hasilText(studio, s) {
+  const tpl = studio.template_hasil || 'Halo Kak {nama}, hasil edit foto {judul} dari {studio} sudah siap 🎉\n\n{link}\n\nTerima kasih sudah memotret bersama kami!';
+  return tpl.replace(/\{(\w+)\}/g, (m, k) => ({ nama: s.pelanggan_nama, judul: s.judul, studio: studio.nama, link: s.hasil_link }[k] ?? m));
+}
+r.put('/sesis/:id/hasil', requireUser('editor.kerja'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  const link = str(req.body.hasil_link, { max: 1000, name: 'Link hasil' });
+  if (link && !/^https?:\/\//i.test(link)) throw bad('Link hasil harus diawali http:// atau https://');
+  await db.q('UPDATE sesis SET hasil_link=$2 WHERE id=$1', [s.id, link || null]);
+  await S.logEvent(null, s.id, 'hasil', req.user.nama, { link: !!link });
+  res.json({ ok: true });
+}));
+r.post('/sesis/:id/hasil/kirim', requireUser('editor.kerja'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  if (!s.hasil_link) throw bad('Isi link hasil akhir dulu.');
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [s.studio_id]);
+  const text = hasilText(studio, s);
+  if (req.body.lewat === 'api') {
+    plans.requireFeature(studio, 'wa_api');
+    if (!wa.configured(studio)) throw bad('WhatsApp API belum dikonfigurasi.');
+    try {
+      await wa.send(studio, { sesiId: s.id, to: s.pelanggan_wa, jenis: 'hasil',
+        template: config.waTemplateHasil ? { name: config.waTemplateHasil, params: [s.pelanggan_nama, s.judul, s.hasil_link] } : null, text });
+    } catch (e) { throw bad(e.message); }
+  }
+  await db.q('UPDATE sesis SET hasil_dikirim_pada=now() WHERE id=$1', [s.id]);
+  await S.logEvent(null, s.id, 'hasil_dikirim', req.user.nama, { lewat: req.body.lewat === 'api' ? 'whatsapp_api' : 'whatsapp' });
+  res.json({ ok: true, text, wa_url: `https://wa.me/${s.pelanggan_wa || ''}?text=${encodeURIComponent(text)}` });
+}));
+
+// ---------- Salin ke folder "Terpilih" di Drive (F-42) ----------
+r.post('/sesis/:id/terpilih', requireUser('sesi.kelola'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [s.studio_id]);
+  plans.requireFeature(studio, 'drive_terpilih');
+  if (s.sumber !== 'service_account') throw bad('Fitur ini butuh folder yang dibagikan ke email layanan (bukan link publik/contoh).');
+  if (s.terpilih_status === 'berjalan') return res.json({ ok: true });
+  const items = await db.many(`SELECT f.drive_file_id, f.nama_file, f.nomor FROM pilihans p JOIN fotos f ON f.id=p.foto_id WHERE p.sesi_id=$1 ORDER BY f.nomor`, [s.id]);
+  if (!items.length) throw bad('Belum ada foto dipilih.');
+  await db.q("UPDATE sesis SET terpilih_status='berjalan', terpilih_info=NULL WHERE id=$1", [s.id]);
+  const nama = req.user.nama;
+  (async () => {
+    try {
+      const folder = await drive.ensureSubfolder(s.drive_folder_id, str(req.body.nama_folder, { max: 80 }) || 'Terpilih');
+      let ok = 0;
+      for (const it of items) {
+        await drive.copyFile(it.drive_file_id, folder, `${F.pad(it.nomor, 0)}_${it.nama_file}`);
+        ok += 1;
+        if (ok % 5 === 0) await db.q('UPDATE sesis SET terpilih_info=$2 WHERE id=$1', [s.id, `${ok}/${items.length}`]);
+      }
+      await db.q("UPDATE sesis SET terpilih_status='selesai', terpilih_folder_id=$2, terpilih_info=$3 WHERE id=$1", [s.id, folder, `${ok} file disalin`]);
+      await S.logEvent(null, s.id, 'drive_terpilih', nama, { jumlah: ok });
+    } catch (e) {
+      const hint = e.status === 403 || e.status === 404 ? ' Pastikan email layanan menjadi Editor folder (bukan Pelihat).' : '';
+      await db.q("UPDATE sesis SET terpilih_status='gagal', terpilih_info=$2 WHERE id=$1", [s.id, String(e.message + hint).slice(0, 400)]);
+    }
+  })();
+  res.json({ ok: true });
+}));
+
+// ---------- Link bayar online foto tambahan (F-35), dari sisi admin ----------
+async function createTagihanPayment(s, studio) {
+  plans.requireFeature(studio, 'bayar_online');
+  if (!payment.enabled()) throw bad('Payment gateway belum dikonfigurasi (MIDTRANS_SERVER_KEY).');
+  const t = await db.one('SELECT * FROM tagihans WHERE sesi_id=$1', [s.id]);
+  if (!t || Number(t.total_rupiah) <= 0) throw bad('Tidak ada tagihan foto tambahan.');
+  if (t.status_bayar === 'lunas') throw bad('Tagihan sudah lunas.');
+  if (t.payment_url && Number(t.payment_total) === Number(t.total_rupiah)) return t.payment_url;
+  const pel = await db.one('SELECT nama, no_wa FROM pelanggans WHERE id=$1', [s.pelanggan_id]);
+  const orderId = `GS-T-${s.id}-${Date.now()}`;
+  const amount = Number(t.total_rupiah);
+  const tokenPlain = decrypt(s.token_enc);
+  let snap;
+  try {
+    snap = await payment.createSnap({ orderId, amount,
+      items: [{ id: `tambahan-${s.id}`, name: `${t.jumlah_foto} foto tambahan · ${s.judul}`.slice(0, 50), price: amount, quantity: 1 }],
+      customer: { first_name: pel.nama, phone: pel.no_wa || undefined }, finishUrl: galleryUrl(tokenPlain) });
+  } catch (e) { throw bad(e.message); }
+  await db.q('UPDATE tagihans SET order_id=$2, payment_url=$3, payment_total=$4, diubah_pada=now() WHERE sesi_id=$1', [s.id, orderId, snap.url, amount]);
+  return snap.url;
+}
+r.post('/sesis/:id/bayar-link', requireUser('tagihan.kelola'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [s.studio_id]);
+  const url = await createTagihanPayment(s, studio);
+  res.json({ ok: true, url, wa_url: s.pelanggan_wa ? `https://wa.me/${s.pelanggan_wa}?text=${encodeURIComponent(`Halo Kak ${s.pelanggan_nama}, berikut link pembayaran foto tambahan ${s.judul}: ${url}`)}` : null });
+}));
+
+// ---------- Mode kiosk (F-45) ----------
+r.post('/sesis/:id/kiosk', requireUser('sesi.kelola'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [s.studio_id]);
+  plans.requireFeature(studio, 'kiosk');
+  if (!['siap', 'dibuka', 'memilih'].includes(s.status)) throw bad('Sesi ini tidak bisa dibuka di kiosk (status: ' + s.status + ').');
+  const tokenPlain = decrypt(s.token_enc);
+  const ct = randomToken(32);
+  await db.tx(async (c) => {
+    await c.query("INSERT INTO client_sessions(token_hash, sesi_id, kedaluwarsa) VALUES ($1,$2, now() + interval '12 hours')", [sha256(ct), s.id]);
+    const cur = (await c.query('SELECT * FROM sesis WHERE id=$1 FOR UPDATE', [s.id])).rows[0];
+    await c.query(`UPDATE sesis SET kiosk=true, jumlah_dibuka=jumlah_dibuka+1, dibuka_pada=COALESCE(dibuka_pada, now()) WHERE id=$1`, [s.id]);
+    if (['siap', 'dibuka'].includes(cur.status)) {
+      // Timer mulai otomatis di kiosk
+      const menit = cur.durasi_pilih_menit > 0 ? cur.durasi_pilih_menit : null;
+      await c.query(`UPDATE sesis SET status='memilih', mulai_pilih_pada=now(), berakhir_pada=${menit ? "now() + ($2 || ' minutes')::interval" : 'GREATEST(tenggat_link, now())'},
+        tenggat_link=GREATEST(tenggat_link, now() + interval '1 hour') WHERE id=$1`, menit ? [s.id, String(menit)] : [s.id]);
+      await S.logEvent(c, s.id, 'mulai', req.user.nama, { mode: 'kiosk', menit });
+    }
+  });
+  setCookie(res, req, `gs_c${s.id}`, ct, { maxAge: 12 * 3600, path: `/g/${tokenPlain}` });
+  res.json({ ok: true, url: `/g/${tokenPlain}?kiosk=1` });
+}));
+
+// ---------- Buat sesi massal dari CSV (F-12) ----------
+function parseCsv(text) {
+  const rows = []; let row = []; let cell = ''; let q = false;
+  const t = String(text || '').replace(/^﻿/, '');
+  const delim = (t.split('\n')[0].match(/;/g) || []).length > (t.split('\n')[0].match(/,/g) || []).length ? ';' : ',';
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (q) {
+      if (ch === '"' && t[i + 1] === '"') { cell += '"'; i++; } else if (ch === '"') q = false; else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === delim) { row.push(cell); cell = ''; } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && t[i + 1] === '\n') i++;
+      row.push(cell); cell = ''; if (row.some((x) => x.trim())) rows.push(row); row = [];
+    } else cell += ch;
+  }
+  row.push(cell); if (row.some((x) => x.trim())) rows.push(row);
+  return rows;
+}
+r.post('/sesis/massal', requireUser('sesi.kelola'), limit('massal', 20, 3600), ah(async (req, res) => {
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
+  plans.requireFeature(studio, 'csv_massal');
+  const rows = parseCsv(req.body.csv);
+  if (rows.length < 2) throw bad('CSV kosong. Baris pertama harus header: nama,no_wa,link_folder,paket,judul,tanggal,pin');
+  const head = rows[0].map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'));
+  const col = (r0, ...names) => { for (const n of names) { const i = head.indexOf(n); if (i >= 0) return (r0[i] || '').trim(); } return ''; };
+  if (rows.length - 1 > 500) throw bad('Maksimal 500 baris per unggahan.');
+  const pakets = await db.many('SELECT id, nama FROM pakets WHERE studio_id=$1 AND NOT arsip', [studio.id]);
+  const def = req.body.default || {};
+  const hasil = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r0 = rows[i];
+    const paketNama = col(r0, 'paket');
+    const paket = paketNama ? pakets.find((p) => p.nama.toLowerCase() === paketNama.toLowerCase()) : null;
+    const link = col(r0, 'link_folder', 'link', 'folder');
+    const body = {
+      pelanggan_nama: col(r0, 'nama', 'nama_pelanggan'), pelanggan_wa: col(r0, 'no_wa', 'wa', 'whatsapp'), judul: col(r0, 'judul'),
+      tanggal_sesi: col(r0, 'tanggal', 'tanggal_sesi'), pin: col(r0, 'pin') || undefined,
+      paket_id: paket ? paket.id : def.paket_id, cabang_id: def.cabang_id,
+      sumber: link ? (def.sumber === 'link_publik' ? 'link_publik' : 'service_account') : (config.allowDemoSource && def.sumber === 'contoh' ? 'contoh' : null),
+      link, jumlah_contoh: def.jumlah_contoh || 24,
+    };
+    try {
+      if (paketNama && !paket) throw bad(`Paket "${paketNama}" tidak ada.`);
+      if (!body.sumber) throw bad('Kolom link_folder kosong.');
+      const out = await db.tx((c) => createSesiIn(c, req.user, studio, body));
+      sync.startSync(out.row.id, req.user.nama);
+      const waRes = req.body.kirim_wa ? await autoSendWa({ ...studio, wa_otomatis: true }, out.row, out.token, out.pin, req.user.nama) : null;
+      hasil.push({ baris: i + 1, ok: true, id: out.row.id, nama: out.pelangganNama, no_wa: out.wa, link: galleryUrl(out.token), pin: out.pin,
+        wa: waRes && waRes.error ? 'gagal: ' + waRes.error : waRes ? 'terkirim' : null });
+    } catch (e) {
+      hasil.push({ baris: i + 1, ok: false, nama: body.pelanggan_nama, error: e.message });
+      if (e.status === 402) break; // kuota paket habis: hentikan
+    }
+  }
+  res.json({ hasil, dibuat: hasil.filter((h) => h.ok).length, gagal: hasil.filter((h) => !h.ok).length });
+}));
+
+// ---------- Laporan (F-44, F-05 per cabang) ----------
+async function laporanData(req) {
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
+  plans.requireFeature(studio, 'laporan');
+  const tz = studio.zona_waktu || 'Asia/Jakarta';
+  const dari = /^\d{4}-\d{2}-\d{2}$/.test(req.query.dari || '') ? req.query.dari : null;
+  const sampai = /^\d{4}-\d{2}-\d{2}$/.test(req.query.sampai || '') ? req.query.sampai : null;
+  const params = [studio.id, tz, dari, sampai];
+  let where = `s.studio_id=$1 AND (s.dibuat_pada AT TIME ZONE $2)::date >= COALESCE($3::date, (now() AT TIME ZONE $2)::date - 29)
+    AND (s.dibuat_pada AT TIME ZONE $2)::date <= COALESCE($4::date, (now() AT TIME ZONE $2)::date)`;
+  const cab = req.user.cabang_id || (req.query.cabang ? parseInt(req.query.cabang, 10) : null);
+  if (cab) { params.push(cab); where += ` AND s.cabang_id=$${params.length}`; }
+  const agg = `count(*)::int AS sesi,
+    count(*) FILTER (WHERE s.dikirim_pada IS NOT NULL)::int AS terkirim,
+    count(*) FILTER (WHERE s.dikirim_pada IS NOT NULL AND NOT s.dikirim_otomatis)::int AS tepat_waktu,
+    count(*) FILTER (WHERE s.status='kedaluwarsa')::int AS kedaluwarsa,
+    count(*) FILTER (WHERE EXISTS (SELECT 1 FROM events e WHERE e.sesi_id=s.id AND e.jenis='minta_waktu'))::int AS minta_waktu,
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM s.dikirim_pada - COALESCE(s.link_dikirim_pada, s.dibuat_pada))) AS median_detik,
+    percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM s.dikirim_pada - s.mulai_pilih_pada)) AS median_pilih_detik,
+    count(*) FILTER (WHERE t.jumlah_foto > 0)::int AS dengan_tambahan,
+    COALESCE(sum(t.jumlah_foto),0)::int AS foto_tambahan,
+    COALESCE(sum(t.total_rupiah) FILTER (WHERE t.status_bayar='lunas'),0)::bigint AS pendapatan_lunas,
+    COALESCE(sum(t.total_rupiah) FILTER (WHERE t.status_bayar<>'lunas'),0)::bigint AS pendapatan_belum`;
+  const from = 'FROM sesis s LEFT JOIN tagihans t ON t.sesi_id=s.id LEFT JOIN cabangs cb ON cb.id=s.cabang_id';
+  const total = await db.one(`SELECT ${agg} ${from} WHERE ${where}`, params);
+  const perCabang = await db.many(`SELECT COALESCE(cb.nama,'Tanpa cabang') AS cabang, s.cabang_id, ${agg} ${from} WHERE ${where} GROUP BY cb.nama, s.cabang_id ORDER BY 1`, params);
+  const perHari = await db.many(`SELECT to_char((s.dibuat_pada AT TIME ZONE $2)::date,'YYYY-MM-DD') AS hari, count(*)::int AS sesi,
+      COALESCE(sum(t.total_rupiah),0)::bigint AS tambahan ${from} WHERE ${where} GROUP BY 1 ORDER BY 1`, params);
+  const perPaket = await db.many(`SELECT COALESCE(pk.nama,'Kustom') AS paket, count(*)::int AS sesi, COALESCE(sum(t.total_rupiah),0)::bigint AS tambahan
+    ${from} LEFT JOIN pakets pk ON pk.id=s.paket_id WHERE ${where} GROUP BY 1 ORDER BY 2 DESC`, params);
+  return { total, per_cabang: perCabang, per_hari: perHari, per_paket: perPaket, dari, sampai };
+}
+r.get('/laporan', requireUser('sesi.kelola'), ah(async (req, res) => res.json(await laporanData(req))));
+r.get('/laporan.csv', requireUser('sesi.kelola'), ah(async (req, res) => {
+  const d = await laporanData(req);
+  const cols = ['cabang', 'sesi', 'terkirim', 'tepat_waktu', 'kedaluwarsa', 'minta_waktu', 'median_detik', 'dengan_tambahan', 'foto_tambahan', 'pendapatan_lunas', 'pendapatan_belum'];
+  const lines = [cols.join(',')].concat(d.per_cabang.concat([{ ...d.total, cabang: 'TOTAL' }]).map((x) => cols.map((c) => `"${String(x[c] ?? '').replace(/"/g, '""')}"`).join(',')));
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', 'attachment; filename="laporan.csv"');
+  res.send('﻿' + lines.join('\r\n') + '\r\n');
+}));
+
+// ---------- Langganan & tagihan studio (F-46) ----------
+r.get('/langganan', requireUser('sesi.lihat'), ah(async (req, res) => {
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
+  const invoices = can(req.user, 'studio.edit') ? await db.many('SELECT id, jenis, plan, bulan, kredit, jumlah, status, payment_url, dibayar_pada, dibuat_pada FROM invoices WHERE studio_id=$1 ORDER BY id DESC LIMIT 24', [studio.id]) : [];
+  res.json({ ...plans.summary(studio), pemakaian: await plans.usage(studio.id), invoices, payment: payment.enabled(),
+    katalog: Object.entries(plans.PLANS).map(([k, p]) => ({ kode: k, nama: p.nama, harga: p.harga, sesi: p.sesi === Infinity ? null : p.sesi, pengguna: p.pengguna === Infinity ? null : p.pengguna, fitur: p.fitur.map((f) => plans.FITUR_NAMA[f]) })),
+    kredit: { sesi: config.kreditPaket, harga: config.kreditHarga } });
+}));
+r.post('/langganan/beli', requireUser('studio.edit'), ah(async (req, res) => {
+  if (!config.billingEnabled) throw bad('Langganan tidak aktif di server ini (BILLING_ENABLED=false): semua fitur sudah terbuka.');
+  if (!payment.enabled()) throw bad('Payment gateway belum dikonfigurasi.');
+  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
+  let inv;
+  if (req.body.kredit) {
+    inv = { jenis: 'kredit', kredit: config.kreditPaket, jumlah: config.kreditHarga, nama: `Kredit ${config.kreditPaket} sesi` };
+  } else {
+    const p = plans.PLANS[req.body.plan];
+    if (!p || !p.harga) throw bad('Paket tidak bisa dibeli online. Hubungi kami untuk paket Bisnis.');
+    const bulan = int(req.body.bulan, { min: 1, max: 12, def: 1, name: 'Bulan' });
+    const jumlah = bulan >= 12 ? p.harga * 10 : p.harga * bulan; // tahunan: hemat 2 bulan
+    inv = { jenis: 'plan', plan: req.body.plan, bulan, jumlah, nama: `Paket ${p.nama} ${bulan} bulan` };
+  }
+  const row = await db.one(`INSERT INTO invoices(studio_id, jenis, plan, bulan, kredit, jumlah, order_id) VALUES ($1,$2,$3,$4,$5,$6, 'tmp-' || gen_random_uuid()) RETURNING id`,
+    [studio.id, inv.jenis, inv.plan || null, inv.bulan || null, inv.kredit || null, inv.jumlah]);
+  const orderId = `GS-I-${row.id}-${Date.now()}`;
+  let snap;
+  try {
+    snap = await payment.createSnap({ orderId, amount: inv.jumlah, items: [{ id: `inv-${row.id}`, name: inv.nama.slice(0, 50), price: inv.jumlah, quantity: 1 }],
+      customer: { first_name: req.user.nama, email: req.user.email }, finishUrl: `${config.baseUrl}/app#/langganan` });
+  } catch (e) { await db.q("UPDATE invoices SET status='batal' WHERE id=$1", [row.id]); throw bad(e.message); }
+  await db.q('UPDATE invoices SET order_id=$2, payment_url=$3 WHERE id=$1', [row.id, orderId, snap.url]);
+  res.json({ ok: true, url: snap.url });
+}));
+
+// ---------- Super admin platform ----------
+async function audit(req, aksi, studioId, detail) {
+  await db.q('INSERT INTO admin_audit(aktor, aksi, studio_id, detail) VALUES ($1,$2,$3,$4)', [req.user.email, aksi, studioId, detail ? JSON.stringify(detail) : null]);
+}
+r.get('/admin/studios', requireSuperadmin(), ah(async (req, res) => {
+  const q = req.query.q ? `%${String(req.query.q).slice(0, 80)}%` : null;
+  res.json(await db.many(`SELECT st.id, st.nama, st.slug, st.plan, st.plan_sampai, st.kredit_sesi, st.aktif, st.dibuat_pada, st.no_wa,
+      (SELECT email FROM users WHERE studio_id=st.id AND peran='owner' ORDER BY id LIMIT 1) AS owner_email,
+      (SELECT count(*)::int FROM users WHERE studio_id=st.id AND aktif) AS pengguna,
+      (SELECT count(*)::int FROM sesis WHERE studio_id=st.id) AS sesi_total,
+      (SELECT count(*)::int FROM sesis WHERE studio_id=st.id AND dibuat_pada >= date_trunc('month', now())) AS sesi_bulan_ini,
+      (SELECT max(dibuat_pada) FROM sesis WHERE studio_id=st.id) AS sesi_terakhir
+    FROM studios st WHERE ($1::text IS NULL OR st.nama ILIKE $1 OR st.slug ILIKE $1) ORDER BY st.id DESC LIMIT 500`, [q]));
+}));
+r.put('/admin/studios/:id', requireSuperadmin(), ah(async (req, res) => {
+  const st = await db.one('SELECT * FROM studios WHERE id=$1', [req.params.id]);
+  if (!st) throw notFound();
+  const plan = plans.PLANS[req.body.plan] ? req.body.plan : st.plan;
+  const sampai = req.body.plan_sampai === '' ? null : (/^\d{4}-\d{2}-\d{2}$/.test(req.body.plan_sampai || '') ? req.body.plan_sampai + 'T23:59:59+07:00' : st.plan_sampai);
+  const tambahKredit = int(req.body.tambah_kredit, { min: -100000, max: 100000, def: 0, name: 'Kredit' });
+  const aktif = req.body.aktif === undefined ? st.aktif : bool(req.body.aktif);
+  await db.q('UPDATE studios SET plan=$2, plan_sampai=$3, kredit_sesi=GREATEST(0, kredit_sesi+$4), aktif=$5 WHERE id=$1', [st.id, plan, sampai, tambahKredit, aktif]);
+  await audit(req, 'ubah_studio', st.id, { plan, plan_sampai: sampai, tambah_kredit: tambahKredit, aktif });
+  res.json({ ok: true });
+}));
+r.get('/admin/audit', requireSuperadmin(), ah(async (req, res) => {
+  res.json(await db.many(`SELECT a.*, st.nama AS studio_nama FROM admin_audit a LEFT JOIN studios st ON st.id=a.studio_id ORDER BY a.waktu DESC LIMIT 200`));
+}));
+r.get('/admin/ringkasan', requireSuperadmin(), ah(async (req, res) => {
+  res.json(await db.one(`SELECT (SELECT count(*)::int FROM studios) AS studio, (SELECT count(*)::int FROM studios WHERE aktif) AS studio_aktif,
+    (SELECT count(*)::int FROM sesis WHERE dibuat_pada > now() - interval '30 days') AS sesi_30h,
+    (SELECT count(DISTINCT studio_id)::int FROM sesis WHERE dibuat_pada > now() - interval '14 days') AS studio_aktif_14h,
+    (SELECT COALESCE(sum(jumlah),0)::bigint FROM invoices WHERE status='lunas' AND dibayar_pada > now() - interval '30 days') AS pendapatan_30h`));
 }));
 
 r.use((req, res, next) => next(new HttpError(404, 'Endpoint tidak ditemukan.')));

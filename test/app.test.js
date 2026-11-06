@@ -263,3 +263,144 @@ test('mutasi API tanpa JSON ditolak (lapis CSRF)', async () => {
   const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'email=a' });
   assert.equal(r.status, 415);
 });
+
+// ======================= V1 / V2 =======================
+const config = require('../src/config');
+const crypto = require('crypto');
+
+test('F-36 harga bertingkat: total termurah dihitung server', async () => {
+  const c = await owner();
+  const s = await sesi(c, { kuota: 1, maks_foto_tambahan: 7, harga_foto_tambahan: 25000, harga_bertingkat: '5=100000', durasi_pilih_menit: 0 });
+  const p = await pelanggan(s);
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) assert.equal((await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: n })).status, 200);
+  const t = (await c.call('GET', `/api/sesis/${s.id}`)).body.tagihan;
+  assert.equal(t.jumlah_foto, 7);
+  assert.equal(Number(t.total_rupiah), 150000); // 5 paket 100rb + 2 × 25rb
+  assert.equal(F.hargaTambahan(4, 25000, [{ jumlah: 5, harga: 100000 }]), 100000);
+});
+
+test('F-46 langganan: kuota sesi paket gratis, kredit musiman, gating fitur', async () => {
+  config.billingEnabled = true;
+  try {
+    const c = await owner();
+    for (let i = 0; i < 10; i++) assert.equal((await c.call('POST', '/api/sesis', { pelanggan_nama: 'P' + i, sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
+    const over = await c.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 });
+    assert.equal(over.status, 402);
+    const me = (await c.call('GET', '/api/me')).body;
+    await db.q('UPDATE studios SET kredit_sesi=1 WHERE id=$1', [me.studio.id]);
+    assert.equal((await c.call('POST', '/api/sesis', { pelanggan_nama: 'Y', sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
+    assert.equal((await db.one('SELECT kredit_sesi FROM studios WHERE id=$1', [me.studio.id])).kredit_sesi, 0);
+    assert.equal((await c.call('GET', '/api/laporan')).status, 402);
+    assert.equal((await c.call('POST', '/api/tim/undang', { email: `z${Date.now()}@x.id`, peran: 'admin' })).status, 402, 'gratis = 1 pengguna');
+    await db.q("UPDATE studios SET plan='pro', plan_sampai=now() + interval '1 month' WHERE id=$1", [me.studio.id]);
+    assert.equal((await c.call('GET', '/api/laporan')).status, 200);
+    await db.q("UPDATE studios SET plan_sampai=now() - interval '1 day' WHERE id=$1", [me.studio.id]);
+    assert.equal((await c.call('GET', '/api/laporan')).status, 402, 'paket kedaluwarsa kembali ke gratis');
+  } finally { config.billingEnabled = false; }
+});
+
+test('F-05 multi-cabang: user cabang hanya melihat sesi cabangnya; laporan per cabang', async () => {
+  const c = await owner();
+  const a = (await c.call('POST', '/api/cabangs', { nama: 'Bandung' })).body;
+  const b = (await c.call('POST', '/api/cabangs', { nama: 'Jakarta' })).body;
+  const sa = await sesi(c, { cabang_id: a.id });
+  const sb = await sesi(c, { cabang_id: b.id });
+  const inv = (await c.call('POST', '/api/tim/undang', { email: `cab${Date.now()}@x.id`, peran: 'admin' })).body;
+  const u = new Client();
+  await u.call('POST', '/api/auth/invite/accept', { token: inv.link.split('/undangan/')[1], nama: 'Kasir BDG', password: 'rahasia123' });
+  const uid = (await u.call('GET', '/api/me')).body.user.id;
+  assert.equal((await c.call('PUT', `/api/tim/${uid}`, { cabang_id: a.id })).status, 200);
+  const list = (await u.call('GET', '/api/sesis')).body.map((x) => x.id);
+  assert.ok(list.includes(sa.id) && !list.includes(sb.id));
+  assert.equal((await u.call('GET', `/api/sesis/${sb.id}`)).status, 404);
+  assert.equal((await u.call('POST', '/api/sesis', { pelanggan_nama: 'Z', sumber: 'contoh', cabang_id: b.id })).status, 403);
+  const lap = (await c.call('GET', '/api/laporan')).body;
+  assert.deepEqual(lap.per_cabang.map((x) => x.cabang).sort(), ['Bandung', 'Jakarta']);
+  assert.equal(lap.total.sesi, 2);
+});
+
+test('F-45 kiosk: staf membuka tanpa PIN, timer mulai otomatis', async () => {
+  const c = await owner();
+  const s = await sesi(c);
+  const r = await c.call('POST', `/api/sesis/${s.id}/kiosk`);
+  assert.equal(r.status, 200);
+  const st = (await c.call('GET', `/g/${s.token}/api/state`)).body;
+  assert.equal(st.fase, 'memilih');
+  assert.equal(st.kiosk, true);
+  assert.equal(st.staff, false, 'di kiosk bukan mode baca-saja');
+  assert.equal((await c.call('POST', `/g/${s.token}/api/pilih`, { nomor: 1 })).status, 200);
+  const today = (await c.call('GET', '/api/sesis?hari_ini=1')).body.map((x) => x.id);
+  assert.ok(today.includes(s.id));
+});
+
+test('F-12 buat sesi massal dari CSV', async () => {
+  const c = await owner();
+  const csv = 'nama;no_wa;link_folder;paket;judul\n"Rina, S.Pd";081234567890;;Wisuda;Wisuda Rina\nBudi;;;Tidak Ada;\nSari;0812000111;;;';
+  const r = (await c.call('POST', '/api/sesis/massal', { csv, default: { sumber: 'contoh', jumlah_contoh: 3 } })).body;
+  assert.equal(r.dibuat, 2);
+  assert.equal(r.gagal, 1);
+  assert.match(r.hasil[1].error, /Paket "Tidak Ada"/);
+  assert.equal(r.hasil[0].nama, 'Rina, S.Pd');
+  assert.match(r.hasil[0].link, /\/g\/[\w-]{20,}/);
+  const d = (await c.call('GET', `/api/sesis/${r.hasil[0].id}`)).body;
+  assert.equal(d.kuota, 5, 'nilai paket Wisuda dipakai');
+});
+
+test('F-17 QR & F-43 hasil akhir tampil di galeri pelanggan', async () => {
+  const c = await owner();
+  const s = await sesi(c, { durasi_pilih_menit: 0 });
+  const qr = await fetch(`${base}/api/sesis/${s.id}/qr.svg`, { headers: { cookie: Object.entries(c.jar).map(([k, v]) => `${k}=${v}`).join('; ') } });
+  assert.equal(qr.status, 200);
+  assert.match(await qr.text(), /^<svg/);
+  const p = await pelanggan(s);
+  await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 1 });
+  await p.call('POST', `/g/${s.token}/api/kirim`);
+  assert.equal((await c.call('PUT', `/api/sesis/${s.id}/hasil`, { hasil_link: 'javascript:alert(1)' })).status, 400);
+  assert.equal((await c.call('PUT', `/api/sesis/${s.id}/hasil`, { hasil_link: 'https://drive.google.com/drive/folders/hasil' })).status, 200);
+  const k = (await c.call('POST', `/api/sesis/${s.id}/hasil/kirim`, { lewat: 'link' })).body;
+  assert.match(k.wa_url, /^https:\/\/wa\.me\//);
+  assert.equal((await p.call('GET', `/g/${s.token}/api/info`)).body.hasil_link, 'https://drive.google.com/drive/folders/hasil');
+});
+
+test('F-35 webhook Midtrans: signature diverifikasi, tagihan & langganan jadi lunas', async () => {
+  const oldKey = config.midtransServerKey;
+  config.midtransServerKey = 'SB-Mid-server-test';
+  const sign = (n) => ({ ...n, signature_key: crypto.createHash('sha512').update(`${n.order_id}${n.status_code}${n.gross_amount}${config.midtransServerKey}`).digest('hex') });
+  try {
+    const c = await owner();
+    const s = await sesi(c, { kuota: 1, durasi_pilih_menit: 0 });
+    const p = await pelanggan(s);
+    await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 1 });
+    await p.call('POST', `/g/${s.token}/api/pilih`, { nomor: 2 });
+    await db.q("UPDATE tagihans SET order_id='GS-T-test-1', payment_total=20000 WHERE sesi_id=$1", [s.id]);
+    const bad = { order_id: 'GS-T-test-1', status_code: '200', gross_amount: '20000.00', transaction_status: 'settlement', payment_type: 'qris', signature_key: 'x' };
+    assert.equal((await p.call('POST', '/api/webhooks/midtrans', bad)).status, 403);
+    assert.equal((await p.call('POST', '/api/webhooks/midtrans', sign({ ...bad, signature_key: undefined }))).status, 200);
+    const t = (await c.call('GET', `/api/sesis/${s.id}`)).body.tagihan;
+    assert.equal(t.status_bayar, 'lunas');
+    assert.equal(t.metode, 'QRIS');
+    // Langganan
+    const me = (await c.call('GET', '/api/me')).body;
+    await db.q("INSERT INTO invoices(studio_id, jenis, plan, bulan, jumlah, order_id) VALUES ($1,'plan','pro',1,399000,'GS-I-test-9')", [me.studio.id]);
+    await p.call('POST', '/api/webhooks/midtrans', sign({ order_id: 'GS-I-test-9', status_code: '200', gross_amount: '399000.00', transaction_status: 'settlement', payment_type: 'bank_transfer' }));
+    const st = await db.one('SELECT plan, plan_sampai FROM studios WHERE id=$1', [me.studio.id]);
+    assert.equal(st.plan, 'pro');
+    assert.ok(new Date(st.plan_sampai) > Date.now() + 27 * 86400000);
+  } finally { config.midtransServerKey = oldKey; }
+});
+
+test('super admin: tangguhkan studio memblokir login studio itu', async () => {
+  const admin = await owner();
+  const meA = (await admin.call('GET', '/api/me')).body;
+  config.superadminEmails.push(meA.user.email.toLowerCase());
+  try {
+    const other = await owner();
+    const meO = (await other.call('GET', '/api/me')).body;
+    assert.equal((await other.call('GET', '/api/admin/studios')).status, 403);
+    const list = (await admin.call('GET', '/api/admin/studios')).body;
+    assert.ok(list.some((x) => x.id === meO.studio.id));
+    assert.equal((await admin.call('PUT', `/api/admin/studios/${meO.studio.id}`, { aktif: false, tambah_kredit: 50 })).status, 200);
+    assert.equal((await other.call('GET', '/api/me')).status, 401);
+    assert.ok((await admin.call('GET', '/api/admin/audit')).body.some((a) => a.aksi === 'ubah_studio'));
+  } finally { config.superadminEmails.length = 0; }
+});

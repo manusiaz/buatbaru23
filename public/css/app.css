@@ -123,3 +123,6 @@
   .stats { grid-template-columns: 1fr 1fr; gap: 10px; }
   .stat .v { font-size: 28px; }
 }
+input[type=file] { max-width: 100%; min-width: 0; font-size: 14px; }
+.row > .select { max-width: 100%; }
+.filters .row > .input, .filters .row > .select { width: auto; flex: 0 1 auto; min-width: 0; }

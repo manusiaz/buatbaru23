@@ -56,7 +56,7 @@
     opts.items.forEach(function (i) {
       if (i.catatan) lines.push('Catatan #' + pad(i.nomor, opts.total) + ': ' + i.catatan);
     });
-    if (opts.tambahan > 0) lines.push('Foto tambahan: ' + opts.tambahan + ' × ' + rupiah(opts.harga) + ' = ' + rupiah(opts.tambahan * opts.harga));
+    if (opts.tambahan > 0) lines.push('Foto tambahan: ' + opts.tambahan + ' foto = ' + rupiah(opts.total != null ? opts.total : opts.tambahan * opts.harga));
     if (opts.catatanUmum) lines.push('Catatan umum: ' + opts.catatanUmum);
     return lines.join('\n');
   }
@@ -79,5 +79,26 @@
     return Object.keys(nums).map(Number).sort(function (a, b) { return a - b; });
   }
 
-  return { pad: pad, stripExt: stripExt, rupiah: rupiah, FORMATS: FORMATS, fileList: fileList, photoLine: photoLine, selectionText: selectionText, csv: csv, parsePasted: parsePasted };
+  // F-36: harga foto tambahan termurah dari harga satuan + paket bertingkat [{jumlah, harga}]
+  function hargaTambahan(n, satuan, tiers) {
+    n = Math.max(0, n | 0); satuan = Number(satuan) || 0;
+    var t = (tiers || []).filter(function (x) { return x && x.jumlah > 0 && x.harga >= 0; });
+    var best = [0];
+    for (var i = 1; i <= n; i++) {
+      var b = best[i - 1] + satuan;
+      t.forEach(function (x) { var prev = Math.max(0, i - x.jumlah); var c = best[prev] + Number(x.harga); if (c < b) b = c; });
+      best[i] = b;
+    }
+    return best[n];
+  }
+  function parseTiers(text) {
+    var out = [];
+    String(text || '').split(/[,;\n]+/).forEach(function (part) {
+      var m = part.replace(/\./g, '').match(/(\d+)\s*[=:x×]\s*(?:rp)?\s*(\d+)/i);
+      if (m) out.push({ jumlah: parseInt(m[1], 10), harga: parseInt(m[2], 10) });
+    });
+    return out.sort(function (a, b) { return a.jumlah - b.jumlah; });
+  }
+
+  return { hargaTambahan: hargaTambahan, parseTiers: parseTiers, pad: pad, stripExt: stripExt, rupiah: rupiah, FORMATS: FORMATS, fileList: fileList, photoLine: photoLine, selectionText: selectionText, csv: csv, parsePasted: parsePasted };
 }));
