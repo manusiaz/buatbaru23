@@ -120,6 +120,14 @@ Audit keamanan independen dijalankan (exploit dicoba langsung). Semua temuan sud
 
 Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat API, CSRF, path traversal, tanda tangan URL media, SSRF.
 
+### Masa coba gratis (per studio)
+
+Berlaku bila `BILLING_ENABLED=true`. Setiap studio dapat **coba gratis 3 hari** (`GRATIS_HARI`) sejak studio itu mendaftar.
+- Setelah habis: tidak bisa membuat galeri baru (termasuk CSV massal) atau mengundang anggota. Galeri yang sudah dikirim tetap bisa dibuka pelanggan sampai tenggatnya. Banner hitung mundur tampil di semua halaman dasbor.
+- **Perpanjang masa coba: Rp 5.000 dari saldo = +3 hari** (`GRATIS_PERPANJANG_HARGA`, `GRATIS_PERPANJANG_HARI`). Bisa diulang dan bertumpuk; bila saldo kurang, studio langsung ditawari top up Rp 5.000 via QRIS.
+- Atau pilih paket berbayar (dibayar dari saldo). Paket berbayar yang habis kembali ke kondisi coba-habis.
+- Super admin bisa mengatur tanggal akhir masa coba per studio (Ubah studio › Berlaku sampai).
+
 ### Suspend / tangguhkan
 
 - **Studio** (super admin › Ubah › matikan "Studio aktif"): staf ter-logout & tidak bisa login, otomasi berhenti, dan **semua galeri pelanggannya offline** (pelanggan melihat "Galeri tidak tersedia" + tombol hubungi studio). Data tetap utuh; aktifkan lagi untuk memulihkan.
@@ -182,7 +190,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000 (NODE_ENV=development)
 ```
 
-Tes integrasi (46 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (48 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

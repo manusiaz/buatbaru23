@@ -129,4 +129,7 @@ async function resumePending() {
   rows.forEach((r) => startSync(r.id, 'sistem'));
 }
 
-module.exports = { startSync, runSync, resumePending, isRunning: (id) => running.has(id), sortFiles };
+// Tunggu semua sinkron yang berjalan selesai (dipakai saat shutdown & tes)
+async function idle() { while (running.size) await Promise.allSettled([...running.values()]); }
+
+module.exports = { idle, startSync, runSync, resumePending, isRunning: (id) => running.has(id), sortFiles };

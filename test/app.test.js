@@ -67,6 +67,7 @@ before(async () => {
 });
 beforeEach(() => require('../src/ratelimit')._reset());
 after(async () => {
+  await sync.idle();
   server.close();
   await db.pool.end();
   fs.rmSync(process.env.DATA_DIR, { recursive: true, force: true });
@@ -944,4 +945,77 @@ test('suspend studio oleh super admin: semua galeri pelanggannya offline, pulih 
   assert.match(r.body.error, /tidak tersedia/);
   await admin.call('PUT', `/api/admin/studios/${sid}`, { aktif: true });
   assert.equal((await p.call('GET', `/g/${s.token}/api/state`)).status, 200);
+});
+
+// ======================= Masa coba gratis 3 hari per studio =======================
+test('coba gratis 3 hari per studio: setelah habis tidak bisa buat galeri/undang; galeri lama tetap jalan; super admin bisa perpanjang', async () => {
+  config.billingEnabled = true;
+  try {
+    const a = await owner();
+    const b = await owner();
+    const sa = await sesi(a, { durasi_pilih_menit: 0 });
+    const idA = await studioOf(a);
+    let L = (await a.call('GET', '/api/langganan')).body;
+    assert.equal(L.trial_habis, false);
+    assert.ok(Math.abs(new Date(L.trial_sampai) - Date.now() - 3 * 86400000) < 60000, 'berakhir 3 hari sejak daftar');
+    // Studio A sudah 4 hari, studio B baru daftar: masing-masing dihitung sendiri
+    await db.q("UPDATE studios SET dibuat_pada = now() - interval '4 days' WHERE id=$1", [idA]);
+    const r = await a.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 });
+    assert.equal(r.status, 402);
+    assert.equal(r.body.trial_habis, true);
+    assert.equal((await a.call('POST', '/api/sesis/massal', { csv: 'nama\nZ', default: { sumber: 'contoh' } })).status, 402, 'CSV massal ikut terblokir');
+    assert.equal((await b.call('POST', '/api/sesis', { pelanggan_nama: 'Y', sumber: 'contoh', jumlah_contoh: 2 })).status, 200, 'studio lain masih dalam masa coba');
+    // Galeri yang sudah dikirim tetap bisa dipakai pelanggan
+    const p = await pelanggan(sa);
+    assert.equal((await p.call('POST', `/g/${sa.token}/api/pilih`, { nomor: 1 })).status, 200);
+    L = (await a.call('GET', '/api/me')).body.langganan;
+    assert.equal(L.trial_habis, true);
+    // Super admin memperpanjang masa coba studio A
+    const admin = await owner();
+    const meA = (await admin.call('GET', '/api/me')).body;
+    await db.q('UPDATE users SET superadmin=true WHERE id=$1', [meA.user.id]);
+    const besok = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+    await admin.call('PUT', `/api/admin/studios/${idA}`, { plan: 'gratis', plan_sampai: besok });
+    assert.equal((await a.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
+    // Paket berbayar aktif → tidak terpengaruh masa coba; paket berbayar habis → kembali terblokir
+    await db.q("UPDATE studios SET plan='starter', plan_sampai=now() + interval '1 month', dibuat_pada=now() - interval '60 days' WHERE id=$1", [idA]);
+    assert.equal((await a.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
+    await db.q("UPDATE studios SET plan_sampai=now() - interval '1 day' WHERE id=$1", [idA]);
+    assert.equal((await a.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 })).status, 402);
+  } finally { config.billingEnabled = false; }
+  // Tanpa billing (instalasi satu studio) tidak ada masa coba
+  const c = await owner();
+  await db.q("UPDATE studios SET dibuat_pada = now() - interval '30 days' WHERE id=$1", [await studioOf(c)]);
+  assert.equal((await c.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
+});
+
+test('perpanjang masa coba: bayar Rp 5.000 dari saldo = +3 hari, bisa bertumpuk; saldo kurang → tawarkan top up', async () => {
+  config.billingEnabled = true;
+  try {
+    const a = await owner();
+    const id = await studioOf(a);
+    await db.q("UPDATE studios SET dibuat_pada = now() - interval '5 days' WHERE id=$1", [id]);
+    assert.ok((await a.call('GET', '/api/langganan')).body.nominal.includes(5000), 'nominal top up Rp 5.000 tersedia');
+    const kurang = await a.call('POST', '/api/langganan/perpanjang-coba');
+    assert.equal(kurang.status, 402);
+    assert.equal(kurang.body.topup, true);
+    await db.q('UPDATE studios SET saldo=12000 WHERE id=$1', [id]);
+    const r1 = (await a.call('POST', '/api/langganan/perpanjang-coba')).body;
+    assert.ok(Math.abs(new Date(r1.trial_sampai) - Date.now() - 3 * 86400000) < 60000, 'habis → +3 hari dari sekarang');
+    assert.equal(r1.saldo, 7000);
+    assert.equal((await a.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 })).status, 200, 'bisa buat galeri lagi');
+    const r2 = (await a.call('POST', '/api/langganan/perpanjang-coba')).body;
+    assert.ok(Math.abs(new Date(r2.trial_sampai) - new Date(r1.trial_sampai) - 3 * 86400000) < 5000, 'masih aktif → bertumpuk dari akhir masa coba');
+    assert.equal(r2.saldo, 2000);
+    assert.equal((await a.call('POST', '/api/langganan/perpanjang-coba')).status, 402, 'saldo Rp 2.000 tidak cukup');
+    const m = (await a.call('GET', '/api/langganan')).body.mutasi;
+    assert.equal(m.filter((x) => /Perpanjang coba gratis/.test(x.keterangan)).length, 2);
+    // Paralel tidak bisa memakai saldo yang sama dua kali
+    await db.q('UPDATE studios SET saldo=5000 WHERE id=$1', [id]);
+    const par = await Promise.all([a.call('POST', '/api/langganan/perpanjang-coba'), a.call('POST', '/api/langganan/perpanjang-coba')]);
+    assert.deepEqual(par.map((x) => x.status).sort(), [200, 402]);
+    // Paket berbayar aktif tidak perlu perpanjang coba
+    await db.q("UPDATE studios SET plan='starter', plan_sampai=now() + interval '1 month' WHERE id=$1", [id]);
+    assert.equal((await a.call('POST', '/api/langganan/perpanjang-coba')).status, 400);
+  } finally { config.billingEnabled = false; }
 });

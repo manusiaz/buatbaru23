@@ -5,7 +5,7 @@ const db = require('./db');
 const { HttpError } = require('./http');
 
 const PLANS = {
-  gratis: { nama: 'Gratis', harga: 0, sesi: 10, pengguna: 1, fitur: [] , label: true },
+  gratis: { nama: 'Coba gratis', harga: 0, sesi: 10, pengguna: 1, fitur: [], label: true },
   starter: { nama: 'Starter', harga: 149000, sesi: 150, pengguna: 3, fitur: ['branding'] },
   pro: { nama: 'Pro', harga: 399000, sesi: 600, pengguna: 10, fitur: ['branding', 'wa_api', 'laporan', 'kiosk', 'bayar_online', 'drive_terpilih', 'csv_massal'] },
   bisnis: { nama: 'Bisnis', harga: null, sesi: Infinity, pengguna: Infinity, fitur: ['branding', 'wa_api', 'laporan', 'kiosk', 'bayar_online', 'drive_terpilih', 'csv_massal', 'multi_cabang'] },
@@ -19,6 +19,20 @@ function effectivePlan(studio) {
   if (!config.billingEnabled) return 'bisnis';
   if (studio.plan !== 'gratis' && studio.plan_sampai && new Date(studio.plan_sampai) < Date.now()) return 'gratis';
   return PLANS[studio.plan] ? studio.plan : 'gratis';
+}
+// Masa coba gratis per studio: sejak studio mendaftar + GRATIS_HARI, atau tanggal yang diatur super admin
+// (plan_sampai pada studio berpaket gratis). Studio yang paket berbayarnya habis juga jatuh ke sini.
+function trialSampai(studio) {
+  if (studio.plan === 'gratis' && studio.plan_sampai) return new Date(studio.plan_sampai);
+  return new Date(new Date(studio.dibuat_pada || Date.now()).getTime() + config.gratisHari * 86400000);
+}
+function trialHabis(studio) {
+  return config.billingEnabled && effectivePlan(studio) === 'gratis' && trialSampai(studio) < Date.now();
+}
+function requireActivePlan(studio) {
+  if (trialHabis(studio)) {
+    throw new HttpError(402, `Masa coba gratis ${config.gratisHari} hari sudah berakhir. Pilih paket berbayar (dibayar dari saldo) untuk membuat galeri baru.`, { upgrade: true, trial_habis: true });
+  }
 }
 function has(studio, fitur) { return PLANS[effectivePlan(studio)].fitur.includes(fitur); }
 function requireFeature(studio, fitur) {
@@ -35,6 +49,7 @@ async function usage(studioId) {
 // Dipanggil di dalam transaksi pembuatan sesi. Kunci baris studio agar pembuatan paralel tidak melewati kuota.
 async function consumeSession(c, studio, n = 1) {
   if (!config.billingEnabled) return;
+  requireActivePlan(studio);
   const plan = PLANS[effectivePlan(studio)];
   if (plan.sesi === Infinity) return;
   await c.query('SELECT 1 FROM studios WHERE id=$1 FOR UPDATE', [studio.id]);
@@ -46,6 +61,7 @@ async function consumeSession(c, studio, n = 1) {
 
 async function checkUserLimit(studio) {
   if (!config.billingEnabled) return;
+  requireActivePlan(studio);
   const plan = PLANS[effectivePlan(studio)];
   const { pengguna } = await usage(studio.id);
   const pending = (await db.one('SELECT count(*)::int AS n FROM invites WHERE studio_id=$1 AND dipakai_pada IS NULL AND kedaluwarsa>now()', [studio.id])).n;
@@ -59,8 +75,11 @@ function summary(studio) {
     billing: config.billingEnabled, plan: key, nama: p.nama, harga: p.harga, plan_sampai: studio.plan_sampai,
     batas_sesi: p.sesi === Infinity ? null : p.sesi, batas_pengguna: p.pengguna === Infinity ? null : p.pengguna,
     fitur: Object.fromEntries(Object.keys(FITUR_NAMA).map((f) => [f, p.fitur.includes(f)])),
+    trial_hari: config.gratisHari, perpanjang_harga: config.perpanjangHarga, perpanjang_hari: config.perpanjangHari,
+    trial_sampai: key === 'gratis' && config.billingEnabled ? trialSampai(studio) : null,
+    trial_habis: trialHabis(studio),
     label_produk: !!p.label && config.billingEnabled, saldo: Number(studio.saldo || 0), perpanjang_otomatis: studio.perpanjang_otomatis,
   };
 }
 
-module.exports = { PLANS, FITUR_NAMA, effectivePlan, has, requireFeature, usage, consumeSession, checkUserLimit, summary };
+module.exports = { trialSampai, trialHabis, requireActivePlan, PLANS, FITUR_NAMA, effectivePlan, has, requireFeature, usage, consumeSession, checkUserLimit, summary };

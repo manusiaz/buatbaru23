@@ -25,6 +25,7 @@ async function main() {
   const stop = async () => {
     server.close();
     sesi.stopBackground();
+    await sync.idle().catch(() => {});
     await sesi.heartbeat().catch(() => {});
     await db.pool.end().catch(() => {});
     process.exit(0);

@@ -12,7 +12,10 @@ const MAX_PENDING = 3;
 const TOPUP_JAM = 24;
 
 function nominalList() {
-  return config.topupNominal;
+  // Nominal perpanjang masa coba selalu tersedia agar studio bisa top up pas
+  const set = new Set(config.topupNominal);
+  if (config.perpanjangHarga > 0) set.add(config.perpanjangHarga);
+  return [...set].sort((a, b) => a - b);
 }
 
 async function createTopup(studioId, userId, nominal) {
@@ -107,6 +110,22 @@ async function bayarPaket(studioId, planKode, bulan, aktor) {
   });
 }
 
+// Perpanjang masa coba gratis: potong saldo, tambah N hari dari akhir masa coba (atau dari sekarang bila sudah habis)
+async function perpanjangCoba(studioId, aktor) {
+  const harga = config.perpanjangHarga; const hari = config.perpanjangHari;
+  return db.tx(async (c) => {
+    const st = (await c.query('SELECT * FROM studios WHERE id=$1 FOR UPDATE', [studioId])).rows[0];
+    if (!st) throw notFound();
+    if (plans.effectivePlan(st) !== 'gratis') throw bad('Studio sedang memakai paket berbayar; tidak perlu memperpanjang masa coba.');
+    if (Number(st.saldo) < harga) throw new HttpError(402, `Saldo kurang. Perpanjang ${hari} hari butuh ${rupiah(harga)}, saldo ${rupiah(st.saldo)}. Top up dulu.`, { topup: true, nominal: harga });
+    const dari = new Date(Math.max(plans.trialSampai(st).getTime(), Date.now()));
+    const sampai = new Date(dari.getTime() + hari * 86400000);
+    const r = (await c.query("UPDATE studios SET saldo = saldo - $2, plan='gratis', plan_sampai=$3 WHERE id=$1 RETURNING saldo", [studioId, harga, sampai])).rows[0];
+    await addLedger(c, studioId, 'bayar_paket', -harga, Number(r.saldo), `Perpanjang coba gratis ${hari} hari`, `coba:${hari}`, aktor);
+    return { saldo: Number(r.saldo), trial_sampai: sampai, harga, hari };
+  });
+}
+
 // Perpanjang otomatis dari saldo menjelang masa paket habis
 async function autoRenew() {
   if (!config.billingEnabled) return 0;
@@ -136,4 +155,4 @@ function start() {
   setTimeout(() => autoRenew().catch(() => {}), 20000).unref();
 }
 
-module.exports = { nominalList, createTopup, cancelTopup, approveTopup, rejectTopup, koreksi, bayarPaket, hargaPaket, autoRenew, start, MAX_PENDING };
+module.exports = { perpanjangCoba, nominalList, createTopup, cancelTopup, approveTopup, rejectTopup, koreksi, bayarPaket, hargaPaket, autoRenew, start, MAX_PENDING };

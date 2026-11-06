@@ -1197,6 +1197,12 @@ r.post('/langganan/bayar', requireUser('studio.edit'), limit('bayar_paket', 20, 
   const out = await saldo.bayarPaket(req.user.studio_id, String(req.body.plan || ''), bulan, req.user.email);
   res.json({ ok: true, ...out });
 }));
+r.post('/langganan/perpanjang-coba', requireUser('studio.edit'), limit('perpanjang_coba', 20, 3600), ah(async (req, res) => {
+  if (!config.billingEnabled) throw bad('Langganan tidak aktif di server ini (BILLING_ENABLED=false).');
+  const out = await saldo.perpanjangCoba(req.user.studio_id, req.user.email);
+  await auditStudio(req, req.user.studio_id, 'perpanjang_coba', { harga: out.harga, hari: out.hari });
+  res.json({ ok: true, ...out });
+}));
 r.put('/langganan/otomatis', requireUser('studio.edit'), ah(async (req, res) => {
   await db.q('UPDATE studios SET perpanjang_otomatis=$2 WHERE id=$1', [req.user.studio_id, bool(req.body.aktif)]);
   res.json({ ok: true });
@@ -1290,7 +1296,8 @@ r.get('/admin/studios', requireSuperadmin(), ah(async (req, res) => {
       (SELECT count(*)::int FROM users WHERE studio_id=st.id AND aktif) AS pengguna,
       (SELECT count(*)::int FROM sesis WHERE studio_id=st.id) AS sesi_total,
       (SELECT count(*)::int FROM sesis WHERE studio_id=st.id AND dibuat_pada >= date_trunc('month', now())) AS sesi_bulan_ini
-    FROM studios st WHERE ($1::text IS NULL OR st.nama ILIKE $1 OR st.slug ILIKE $1) ORDER BY st.id DESC LIMIT 500`, [q]));
+    FROM studios st WHERE ($1::text IS NULL OR st.nama ILIKE $1 OR st.slug ILIKE $1) ORDER BY st.id DESC LIMIT 500`, [q])
+    .then((rows) => rows.map((x) => ({ ...x, trial_sampai: plans.trialSampai(x), trial_habis: plans.trialHabis(x) }))));
 }));
 r.put('/admin/studios/:id', requireSuperadmin(), ah(async (req, res) => {
   const st = await db.one('SELECT * FROM studios WHERE id=$1', [parseInt(req.params.id, 10) || 0]);

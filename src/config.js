@@ -36,6 +36,11 @@ const config = {
   isProd: env.NODE_ENV === 'production',
   // Langganan (F-46). false = semua fitur terbuka tanpa batas (cocok untuk satu studio sendiri)
   billingEnabled: /^(1|true)$/i.test(env.BILLING_ENABLED || ''),
+  // Masa coba akun gratis per studio (hari sejak studio mendaftar)
+  gratisHari: Math.max(0, int(env.GRATIS_HARI, 3)),
+  // Perpanjang masa coba: bayar dari saldo
+  perpanjangHarga: Math.max(0, int(env.GRATIS_PERPANJANG_HARGA, 5000)),
+  perpanjangHari: Math.max(1, int(env.GRATIS_PERPANJANG_HARI, int(env.GRATIS_HARI, 3))),
   // Nominal top up saldo yang boleh dipilih (Rupiah)
   topupNominal: String(env.TOPUP_NOMINAL || '50000,100000,250000,500000,1000000').split(',').map((x) => parseInt(x, 10)).filter((x) => x > 0 && x <= 100000000),
   // Payment gateway Midtrans (F-35)

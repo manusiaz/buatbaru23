@@ -83,12 +83,48 @@
       h('button', { type: 'button', 'aria-label': 'Keluar', title: 'Keluar', onclick: function () { api('POST', '/api/auth/logout', {}).then(function () { location.href = '/masuk'; }); } }, ic('keluar'))));
   }
 
+  // Perpanjang masa coba dari saldo; bila saldo kurang, tawarkan top up pas
+  function perpanjangCoba() {
+    var L = ME.langganan;
+    UI.confirm('Perpanjang masa coba ' + L.perpanjang_hari + ' hari?', F.rupiah(L.perpanjang_harga) + ' dipotong dari saldo (' + F.rupiah(L.saldo) + ').', 'Bayar ' + F.rupiah(L.perpanjang_harga)).then(function (ok) {
+      if (!ok) return;
+      api('POST', '/api/langganan/perpanjang-coba').then(function (r) {
+        UI.toast('Masa coba diperpanjang sampai ' + UI.fmtDateTime(r.trial_sampai, tz()));
+        return refreshMe().then(route);
+      }).catch(function (e) {
+        if (e.status === 402 && e.data && e.data.topup) {
+          UI.modal({ title: 'Saldo belum cukup', body: e.message, actions: [{ label: 'Nanti' }, { label: 'Top up ' + F.rupiah(L.perpanjang_harga), cls: 'btn-primary', onClick: function (c) {
+            c(); api('POST', '/api/langganan/topup', { nominal: L.perpanjang_harga }).then(function () { go('#/langganan'); UI.toast('Top up dibuat. Scan QRIS & unggah bukti di bagian Permintaan top up.'); }).catch(err);
+          } }] });
+        } else err(e);
+      });
+    });
+  }
+
+  // Banner masa coba gratis per studio
+  function trialBanner() {
+    var L = ME.langganan;
+    if (!L.billing || !L.trial_sampai) return null;
+    var ms = new Date(L.trial_sampai).getTime() - Date.now();
+    var link = can('studio.edit') ? h('div.row',
+      L.perpanjang_harga ? h('button.btn.btn-sm.btn-amber', { type: 'button', onclick: perpanjangCoba }, 'Perpanjang ' + L.perpanjang_hari + ' hari · ' + F.rupiah(L.perpanjang_harga)) : null,
+      h('a.btn.btn-sm.btn-primary', { href: '#/langganan' }, 'Pilih paket')) : h('span.small', 'Minta owner studio memperpanjang atau memilih paket.');
+    if (L.trial_habis) {
+      return h('div.alert.err', { style: { marginBottom: '16px' } }, h('div.alert-row',
+        h('div', h('b', 'Masa coba gratis ' + L.trial_hari + ' hari sudah berakhir. '), 'Galeri yang sudah dikirim tetap bisa dibuka pelanggan, tapi galeri baru belum bisa dibuat.'), link));
+    }
+    var sisa = ms > 86400000 ? Math.ceil(ms / 86400000) + ' hari' : Math.max(1, Math.ceil(ms / 3600000)) + ' jam';
+    return h('div.alert', { style: { marginBottom: '16px' } }, h('div.alert-row',
+      h('div', h('b', 'Masa coba gratis berakhir dalam ' + sisa), ' (' + UI.fmtDateTime(L.trial_sampai, tz()) + '). Setelah itu pilih paket agar tetap bisa membuat galeri baru.'), link));
+  }
+
   function route() {
     clearInterval(pollT); pollT = null;
     var path = location.hash.replace(/^#/, '').split('?')[0] || '/dasbor';
     var parts = path.split('/').filter(Boolean);
     drawSide();
     main.innerHTML = '';
+    var tb = trialBanner(); if (tb) main.appendChild(tb);
     window.scrollTo(0, 0);
     var r = parts[0];
     try {
@@ -1093,7 +1129,8 @@
         var sisa = d.batas_sesi == null ? 'Tanpa batas' : Math.max(0, d.batas_sesi - d.pemakaian.sesi_bulan_ini) + ' dari ' + d.batas_sesi;
         box.appendChild(h('div.stats',
           h('div.stat', h('span.label', 'Saldo'), h('div.v', { style: { fontSize: '28px' } }, F.rupiah(d.saldo)), h('div.small.muted', 'Untuk membayar paket bulanan')),
-          h('div.stat', h('span.label', 'Paket aktif'), h('div.v', d.nama), h('div.small.muted', d.plan_sampai ? 'Sampai ' + UI.fmtDate(d.plan_sampai, tz()) : d.plan === 'gratis' ? 'Gratis selamanya' : '')),
+          h('div.stat', h('span.label', 'Paket aktif'), h('div.v', d.nama), h('div.small' + (d.trial_habis ? '' : '.muted'), { style: d.trial_habis ? { color: 'var(--scarlet)', fontWeight: 700 } : null },
+            d.plan === 'gratis' && d.trial_sampai ? (d.trial_habis ? 'Masa coba berakhir ' : 'Coba gratis sampai ') + UI.fmtDateTime(d.trial_sampai, tz()) : d.plan_sampai ? 'Sampai ' + UI.fmtDate(d.plan_sampai, tz()) : '')),
           h('div.stat', h('span.label', 'Sisa sesi bulan ini'), h('div.v', { style: { fontSize: '26px' } }, sisa), h('div.small.muted', d.pemakaian.sesi_bulan_ini + ' sesi dibuat bulan ini')),
           h('div.stat', h('span.label', 'Pengguna'), h('div.v', d.pemakaian.pengguna + (d.batas_pengguna ? '/' + d.batas_pengguna : '')), h('div.small.muted', 'Anggota tim aktif'))));
         if (owner) {
@@ -1110,11 +1147,12 @@
           return h('section.card', { style: cur ? { border: '2px solid var(--amber)' } : null },
             h('div.row', { style: { justifyContent: 'space-between' } }, h('b', { style: { fontSize: '18px' } }, p.nama), cur ? h('span.badge.st-terkirim', 'Aktif') : null),
             h('div', { style: { font: '800 26px var(--f-display)', margin: '8px 0' } }, p.harga == null ? 'Negosiasi' : p.harga ? F.rupiah(p.harga) : 'Rp 0', p.harga ? h('span.small.muted', ' /bulan') : null),
-            h('ul.small.muted', { style: { paddingLeft: '18px' } }, h('li', (p.sesi == null ? 'Sesi tanpa batas' : p.sesi + ' sesi/bulan')), h('li', (p.pengguna == null ? 'Pengguna tanpa batas' : p.pengguna + ' pengguna')), p.fitur.map(function (f) { return h('li', f); })),
+            h('ul.small.muted', { style: { paddingLeft: '18px' } }, p.kode === 'gratis' ? h('li', h('b', 'Berlaku ' + d.trial_hari + ' hari sejak studio mendaftar')) : null, h('li', (p.sesi == null ? 'Sesi tanpa batas' : p.sesi + ' sesi/bulan')), h('li', (p.pengguna == null ? 'Pengguna tanpa batas' : p.pengguna + ' pengguna')), p.fitur.map(function (f) { return h('li', f); })),
             p.harga && owner ? h('div.row',
               h('button.btn.btn-sm.btn-primary', { type: 'button', onclick: function () { bayar(p.kode, 1, p.harga, p.nama + ' 1 bulan'); } }, cur ? 'Perpanjang 1 bulan' : '1 bulan'),
               h('button.btn.btn-sm.btn-secondary', { type: 'button', onclick: function () { bayar(p.kode, 12, p.harga * 10, p.nama + ' 12 bulan'); } }, '12 bulan (hemat 2)')) : null,
-            p.harga == null ? h('p.small.muted', 'Multi-cabang, SLA, onboarding. Hubungi tim kami.') : null);
+            p.harga == null ? h('p.small.muted', 'Multi-cabang, SLA, onboarding. Hubungi tim kami.') : null,
+            p.kode === 'gratis' && d.plan === 'gratis' && owner && d.perpanjang_harga ? h('button.btn.btn-sm.btn-amber', { type: 'button', onclick: perpanjangCoba }, 'Perpanjang ' + d.perpanjang_hari + ' hari · ' + F.rupiah(d.perpanjang_harga)) : null);
         })));
         if (!owner) return;
         // Top up
@@ -1183,7 +1221,7 @@
           h('thead', h('tr', h('th', 'Studio'), h('th', 'Owner'), h('th', 'Paket'), h('th', 'Sampai'), h('th', 'Saldo'), h('th', 'Sesi bln ini'), h('th', 'Status'), h('th', ''))),
           h('tbody', rows.map(function (st) {
             return h('tr', h('td', h('b', st.nama), h('div.small.muted', '#' + st.id + ' · ' + st.pengguna + ' pengguna · ' + st.sesi_total + ' sesi')), h('td.small', st.owner_email || '–'),
-              h('td', st.plan), h('td.small', st.plan_sampai ? UI.fmtDate(st.plan_sampai) : '–'), h('td.mono', F.rupiah(Number(st.saldo))), h('td.mono', String(st.sesi_bulan_ini)),
+              h('td', st.plan), h('td.small', st.plan === 'gratis' ? h('span', { style: { color: st.trial_habis ? 'var(--scarlet)' : null } }, (st.trial_habis ? 'Coba habis ' : 'Coba s/d ') + UI.fmtDate(st.trial_sampai)) : st.plan_sampai ? UI.fmtDate(st.plan_sampai) : '–'), h('td.mono', F.rupiah(Number(st.saldo))), h('td.mono', String(st.sesi_bulan_ini)),
               h('td', st.aktif ? h('span.badge.st-siap', 'Aktif') : h('span.badge.st-kedaluwarsa', 'Ditangguhkan')),
               h('td', h('button.btn.btn-sm.btn-secondary', { type: 'button', onclick: function () { editStudio(st); } }, 'Ubah')));
           }))))));
@@ -1199,7 +1237,7 @@
       var ket = h('input.input', { placeholder: 'Alasan koreksi (wajib bila diisi)' });
       var aktif = h('input', { type: 'checkbox', checked: st.aktif });
       var waPlat = h('input', { type: 'checkbox', checked: st.wa_platform });
-      UI.modal({ title: st.nama, body: h('div.stack', { style: { gap: '12px' } }, h('label.field', h('span', 'Paket'), plan), h('label.field', h('span', 'Berlaku sampai'), sampai, h('span.hint', 'Kosongkan untuk tanpa batas waktu')),
+      UI.modal({ title: st.nama, body: h('div.stack', { style: { gap: '12px' } }, h('label.field', h('span', 'Paket'), plan), h('label.field', h('span', 'Berlaku sampai'), sampai, h('span.hint', 'Paket gratis: tanggal akhir masa coba (kosongkan = ' + 'otomatis sejak daftar). Paket berbayar: akhir masa aktif.')),
         h('div.toggle-row', h('b', 'Studio aktif'), h('label.switch', aktif, h('span'))),
         h('div.toggle-row', h('div', h('b', 'Boleh pakai nomor WhatsApp platform'), h('span.small.muted', 'Hanya untuk studio tepercaya; cegah spam.')), h('label.switch', waPlat, h('span'))),
         h('label.field', h('span', 'Koreksi saldo (Rp, saldo sekarang ' + F.rupiah(Number(st.saldo)) + ')'), koreksi, ket)),
@@ -1527,7 +1565,7 @@
   }
   var AUDIT = { login: 'Masuk', login_gagal: 'Gagal masuk', logout: 'Keluar', daftar_studio: 'Studio didaftarkan', gabung_tim: 'Bergabung ke tim', undang_tim: 'Undang anggota',
     batal_undangan: 'Batalkan undangan', ubah_anggota: 'Ubah anggota', ubah_logo: 'Ganti logo', ubah_token_wa: 'Ganti token WhatsApp', ubah_pengaturan: 'Ubah pengaturan',
-    hapus_galeri: 'Hapus galeri', tangguhkan_galeri: 'Tangguhkan galeri', pulihkan_galeri: 'Pulihkan galeri', tangguhkan_pelanggan: 'Tangguhkan pelanggan', pulihkan_pelanggan: 'Pulihkan pelanggan', ganti_pin: 'Ganti PIN galeri', ganti_link: 'Ganti link galeri', ekspor: 'Ekspor nama file', keluarkan_perangkat: 'Keluarkan perangkat' };
+    hapus_galeri: 'Hapus galeri', perpanjang_coba: 'Perpanjang masa coba', tangguhkan_galeri: 'Tangguhkan galeri', pulihkan_galeri: 'Pulihkan galeri', tangguhkan_pelanggan: 'Tangguhkan pelanggan', pulihkan_pelanggan: 'Pulihkan pelanggan', ganti_pin: 'Ganti PIN galeri', ganti_link: 'Ganti link galeri', ekspor: 'Ekspor nama file', keluarkan_perangkat: 'Keluarkan perangkat' };
   function auditSection() {
     var list = h('ul.log', h('li.muted', 'Memuat…'));
     api('GET', '/api/audit-keamanan').then(function (rows) {
