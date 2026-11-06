@@ -291,7 +291,12 @@ async function copyFile(fileId, parentId, name) {
   return writeFetch(u.toString(), { method: 'POST', body: JSON.stringify({ parents: [parentId], name }) });
 }
 
+function resetCache() { saCache = null; for (const k of Object.keys(tokenCaches)) delete tokenCaches[k]; }
+require('./integrasi').onChange(resetCache);
+async function testServiceAccount() { resetCache(); await saAccessToken(); return true; }
+
 module.exports = {
+  resetCache, testServiceAccount,
   ensureSubfolder, copyFile,
   DriveError, parseFolderLink, checkAccess, listImages, fetchImage,
   shareFolderWithServiceAccount, serviceAccountEmail, IMAGE_EXT,

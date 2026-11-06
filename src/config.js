@@ -29,7 +29,8 @@ const config = {
   securityContact: env.SECURITY_CONTACT || '',
   // Login studio default HANYA lewat Google (email terverifikasi, 2FA & pemulihan akun diurus Google, tidak ada kata sandi tersimpan).
   // Login email+kata sandi hanya bila diizinkan eksplisit, atau bila Google belum dikonfigurasi (mis. lokal/tes).
-  passwordLogin: env.ALLOW_PASSWORD_LOGIN === 'true' || (!env.GOOGLE_CLIENT_ID && env.ALLOW_PASSWORD_LOGIN !== 'false'),
+  // (lihat getter passwordLogin di bawah)
+  adminIpAllowlist: String(env.ADMIN_IP_ALLOWLIST || '').split(',').map((x) => x.trim()).filter(Boolean),
   previewUrlTtlSec: Math.min(int(env.PREVIEW_URL_TTL_SEC, 3600), 3600),
   allowDemoSource: env.ALLOW_DEMO_SOURCE !== 'false',
   isProd: env.NODE_ENV === 'production',
@@ -49,6 +50,16 @@ const config = {
   waTemplateHasil: env.WA_TEMPLATE_HASIL || '',
   waTemplateLang: env.WA_TEMPLATE_LANG || 'id',
 };
+
+let passwordLoginOverride = null; // hanya untuk tes; null = ikuti env & Client ID
+Object.defineProperty(config, 'passwordLogin', {
+  enumerable: true,
+  get() {
+    if (passwordLoginOverride !== null) return passwordLoginOverride;
+    return env.ALLOW_PASSWORD_LOGIN === 'true' || (!config.googleClientId && env.ALLOW_PASSWORD_LOGIN !== 'false');
+  },
+  set(v) { passwordLoginOverride = v === null || v === undefined ? null : !!v; },
+});
 
 if (!config.appSecret) {
   if (!['development', 'test'].includes(env.NODE_ENV)) {

@@ -68,7 +68,7 @@
     if (can('sesi.kelola')) items.push(['tim', 'Tim & peran', 'tim']);
     if (can('studio.edit')) items.push(['pengaturan', 'Pengaturan', 'pengaturan']);
     if (ME.langganan.billing) items.push(['langganan', 'Langganan', 'kartu']);
-    if (ME.superadmin) items.push(['admin', 'Super admin', 'kunci']);
+    if (ME.superadmin) items.push(['admin', 'Super admin', 'kunci'], ['integrasi', 'Integrasi & kunci API', 'perisai']);
     side.innerHTML = '';
     side.appendChild(h('div.brand', h('div.logo-mark', ME.studio.logo_url ? h('img', { src: ME.studio.logo_url, alt: '' }) : '001'),
       h('div', h('b', CFG.appName), h('small', ME.studio.nama))));
@@ -107,6 +107,7 @@
       if (r === 'massal') return pageMassal();
       if (r === 'langganan') return pageLangganan();
       if (r === 'admin') return pageAdmin();
+      if (r === 'integrasi') return pageIntegrasi();
       main.appendChild(h('div.empty', h('p.title', 'Halaman tidak ditemukan'), h('a', { href: '#/dasbor' }, 'Kembali ke dasbor')));
     } catch (e) { err(e); }
   }
@@ -1221,6 +1222,143 @@
         } }, 'Simpan QRIS'))));
     }
     var t; q.addEventListener('input', function () { clearTimeout(t); t = setTimeout(load, 300); });
+    load();
+  }
+
+
+  // ---------- Integrasi & kunci API (super admin, sudo mode) ----------
+  function pageIntegrasi() {
+    main.appendChild(head('Integrasi & kunci API', 'Super admin · platform'));
+    var box = h('div.stack'); main.appendChild(box);
+    var tick = null;
+    function load() {
+      clearInterval(tick);
+      api('GET', '/api/admin/integrasi').then(function (d) {
+        box.innerHTML = '';
+        if (!d.grup) return gate(d);
+        var end = new Date(d.sudo_sampai).getTime();
+        var left = h('b.mono');
+        tick = setInterval(function () {
+          if (!document.body.contains(left)) return clearInterval(tick);
+          var ms = end - Date.now();
+          if (ms <= 0) { clearInterval(tick); UI.toast('Sesi aman berakhir, halaman dikunci.'); load(); return; }
+          left.textContent = UI.dur(ms);
+        }, 1000);
+        left.textContent = UI.dur(end - Date.now());
+        box.appendChild(h('div.alert.info', h('div.alert-row',
+          h('div', ic('perisai'), ' Mode aman aktif · terkunci otomatis dalam ', left, '. Rahasia tidak pernah ditampilkan; isi kolom untuk menggantinya. Semua perubahan dicatat di audit.'),
+          h('button.btn.btn-sm.btn-secondary', { type: 'button', onclick: function () { api('POST', '/api/admin/sudo/kunci').then(load); } }, ic('kunci'), 'Kunci sekarang'))));
+        d.grup.forEach(function (g) { box.appendChild(groupCard(g)); });
+      }).catch(err);
+    }
+    function gate(d) {
+      var card = h('section.card', { style: { maxWidth: '560px' } },
+        h('div', { style: { display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '8px' } }, h('div.logo-mark', { style: { background: 'var(--abyss)', color: '#fff' } }, ic('perisai')), h('h2.title', 'Konfirmasi identitas')),
+        h('p.muted', 'Halaman ini menyimpan kunci API & token seluruh platform. Untuk membukanya, konfirmasi lagi bahwa ini memang kamu. Akses berlaku 10 menit.'));
+      var errBox = h('p.err-text', { role: 'alert' });
+      if (d.metode_sudo === 'google') {
+        var holder = h('div', { style: { minHeight: '44px' } });
+        card.appendChild(holder);
+        if (!d.google_client_id) holder.appendChild(h('div.alert.err', 'GOOGLE_CLIENT_ID belum diisi di server.'));
+        else loadScript('https://accounts.google.com/gsi/client').then(function () {
+          google.accounts.id.initialize({ client_id: d.google_client_id, auto_select: false, callback: function (resp) {
+            api('POST', '/api/admin/sudo', { credential: resp.credential }).then(function () { UI.toast('Identitas terkonfirmasi'); load(); }).catch(function (e) { errBox.textContent = e.message; });
+          } });
+          google.accounts.id.renderButton(holder, { theme: 'filled_black', size: 'large', shape: 'pill', text: 'continue_with', locale: 'id' });
+        }).catch(function () { holder.appendChild(h('div.alert.err', 'Gagal memuat Google Sign-In.')); });
+      } else {
+        var pw = h('input.input', { type: 'password', autocomplete: 'current-password', placeholder: 'Kata sandi akunmu', 'aria-label': 'Kata sandi' });
+        var go2 = function () { api('POST', '/api/admin/sudo', { password: pw.value }).then(function () { UI.toast('Identitas terkonfirmasi'); load(); }).catch(function (e) { errBox.textContent = e.message; pw.select(); }); };
+        pw.addEventListener('keydown', function (e) { if (e.key === 'Enter') go2(); });
+        card.appendChild(h('div.row', { style: { flexWrap: 'nowrap' } }, pw, h('button.btn.btn-primary', { type: 'button', onclick: go2 }, 'Konfirmasi')));
+      }
+      card.appendChild(errBox);
+      card.appendChild(h('p.small.muted', 'IP kamu: ', h('span.mono', d.ip || '-'), '. Pembatasan IP admin bisa diatur lewat ADMIN_IP_ALLOWLIST di server.'));
+      box.appendChild(card);
+    }
+    // Client ID baru harus dibuktikan dengan login Google memakai Client ID itu (cegah terkunci di luar)
+    function proveClientId(cid) {
+      var holder = h('div', { style: { minHeight: '44px', display: 'flex', justifyContent: 'center' } });
+      var msg = h('p.err-text');
+      var m = UI.modal({ title: 'Buktikan Client ID berfungsi', body: h('div.stack', { style: { gap: '12px' } },
+        h('p.muted', 'Masuk dengan akun Google super admin ini memakai Client ID baru. Kalau berhasil, Client ID disimpan. Ini mencegah semua orang terkunci karena Client ID salah.'),
+        h('p.small.mono', cid), holder, msg), actions: [{ label: 'Batal' }] });
+      loadScript('https://accounts.google.com/gsi/client').then(function () {
+        google.accounts.id.initialize({ client_id: cid, auto_select: false, callback: function (resp) {
+          api('PUT', '/api/admin/integrasi/google_client_id', { nilai: cid, credential: resp.credential })
+            .then(function () { m.close(); UI.toast('Client ID terverifikasi & disimpan'); load(); })
+            .catch(function (e) { msg.textContent = e.message; });
+        } });
+        google.accounts.id.renderButton(holder, { theme: 'filled_black', size: 'large', shape: 'pill', text: 'continue_with', locale: 'id' });
+      }).catch(function () { msg.textContent = 'Gagal memuat Google Sign-In.'; });
+    }
+    function groupCard(g) {
+      var ok = g.fields.filter(function (f) { return f.terisi && !f.bool; }).length, total = g.fields.filter(function (f) { return !f.bool; }).length;
+      var res = h('div');
+      var card = h('section.card',
+        h('div.row', { style: { justifyContent: 'space-between', marginBottom: '4px' } }, h('h2.title', g.nama),
+          h('div.row', h('span.badge.' + (ok === total ? 'st-siap' : ok ? 'st-segera' : 'st-selesai'), ok + '/' + total + ' terisi'),
+            ['google', 'midtrans', 'whatsapp', 'email'].indexOf(g.grup) >= 0 ? h('button.btn.btn-sm.btn-secondary', { type: 'button', onclick: function (e) {
+              var b = e.currentTarget; b.disabled = true; res.innerHTML = ''; res.appendChild(h('p.small.muted', 'Menguji koneksi…'));
+              api('POST', '/api/admin/integrasi/tes/' + g.grup).then(function (r) {
+                b.disabled = false; res.innerHTML = '';
+                res.appendChild(h('div.alert.' + (r.ok ? 'info' : 'err'), h('b', r.ok ? 'Berhasil: ' : 'Gagal: '), r.pesan, h('span.small.muted', ' (' + r.ms + ' ms)')));
+              }).catch(function (x) { b.disabled = false; res.innerHTML = ''; err(x); });
+            } }, 'Tes koneksi') : null)),
+        h('p.small.muted', { style: { margin: '0 0 8px' } }, g.bantuan.replace('{BASE_URL}', CFG.baseUrl)), res);
+      g.fields.forEach(function (f) { card.appendChild(fieldRow(f)); });
+      return card;
+    }
+    function fieldRow(f) {
+      var sumber = { database: ['st-siap', 'Tersimpan'], env: ['st-dibuka', 'Dari env'], kosong: ['st-selesai', 'Kosong'] }[f.sumber];
+      var meta = h('div.small.muted', f.diubah_pada ? 'Diubah ' + UI.rel(f.diubah_pada) + ' oleh ' + (f.diubah_oleh || '-') : f.sumber === 'env' ? 'Diatur di file .env server' : '');
+      var row = h('div', { style: { borderTop: '1px solid var(--line)', padding: '14px 0', display: 'grid', gap: '8px' } });
+      var title = h('div.row', { style: { justifyContent: 'space-between' } },
+        h('div', h('b', f.label), ' ', h('span.badge.' + sumber[0], sumber[1]), f.rahasia ? h('span.badge.st-memilih', { style: { marginLeft: '6px' } }, ic('kunci'), 'Rahasia') : null),
+        f.sumber === 'database' && !f.bool ? h('button.btn.btn-sm.btn-text', { type: 'button', onclick: function () {
+          UI.confirm('Hapus ' + f.label + '?', 'Nilai di database dihapus. Bila ada nilai di .env, nilai itu yang dipakai lagi.', 'Hapus', 'btn-danger').then(function (y) {
+            if (y) api('DELETE', '/api/admin/integrasi/' + f.k).then(function () { UI.toast('Dihapus'); load(); }).catch(err);
+          });
+        } }, 'Hapus') : null);
+      row.appendChild(title);
+      if (f.bool) {
+        var cb = h('input', { type: 'checkbox', checked: f.nilai, onchange: function (e) {
+          api('PUT', '/api/admin/integrasi/' + f.k, { nilai: e.target.checked }).then(function () { UI.toast('Disimpan'); load(); }).catch(function (x) { e.target.checked = !e.target.checked; err(x); });
+        } });
+        row.appendChild(h('div.toggle-row', { style: { borderTop: 0, padding: 0 } }, h('span.small.muted', f.nilai ? 'Aktif' : 'Nonaktif (sandbox)'), h('label.switch', cb, h('span'))));
+        row.appendChild(meta);
+        return row;
+      }
+      if (f.rahasia && f.terisi) row.appendChild(h('div.small', 'Nilai sekarang: ', h('span.mono', f.samaran || '••••'), f.info_publik ? h('span.muted', ' · ' + f.info_publik) : null));
+      var inp = f.multiline
+        ? h('textarea.textarea.mono', { rows: 4, spellcheck: 'false', autocomplete: 'off', placeholder: f.terisi ? 'Tempel nilai baru untuk mengganti' : 'Tempel di sini', style: { fontSize: '12px' } })
+        : h('input.input' + (f.rahasia ? '.mono' : ''), { type: f.rahasia ? 'password' : 'text', autocomplete: 'off', spellcheck: 'false', value: f.rahasia ? '' : f.nilai,
+          placeholder: f.rahasia ? (f.terisi ? 'Isi untuk mengganti (nilai lama tidak ditampilkan)' : 'Tempel di sini') : '' });
+      var save = h('button.btn.btn-primary.btn-sm', { type: 'button', onclick: function () {
+        if (!inp.value.trim()) { UI.toast('Kolom masih kosong', true); return; }
+        if (f.k === 'google_client_id') return proveClientId(inp.value.trim());
+        save.disabled = true;
+        api('PUT', '/api/admin/integrasi/' + f.k, { nilai: inp.value }).then(function () {
+          inp.value = ''; UI.toast(f.label + ' disimpan'); load();
+        }).catch(function (x) { save.disabled = false; err(x); });
+      } }, 'Simpan');
+      var extra = null;
+      if (f.multiline) {
+        var file = h('input', { type: 'file', accept: '.json,application/json', onchange: function () {
+          var fl = file.files[0]; if (!fl) return; if (fl.size > 10000) { UI.toast('File terlalu besar', true); return; }
+          var rd = new FileReader(); rd.onload = function () { inp.value = rd.result; }; rd.readAsText(fl);
+        } });
+        extra = h('label.small', 'atau pilih file .json: ', file);
+      }
+      if (f.rahasia && !f.multiline) {
+        var eye = h('button.btn.btn-sm.btn-text', { type: 'button', 'aria-label': 'Tampilkan yang sedang diketik', onclick: function () { inp.type = inp.type === 'password' ? 'text' : 'password'; } }, ic('lihat'));
+        row.appendChild(h('div.row', { style: { flexWrap: 'nowrap' } }, inp, eye, save));
+      } else {
+        row.appendChild(f.multiline ? h('div.stack', { style: { gap: '8px' } }, inp, h('div.row', extra, save)) : h('div.row', { style: { flexWrap: 'nowrap' } }, inp, save));
+      }
+      row.appendChild(meta);
+      return row;
+    }
     load();
   }
 

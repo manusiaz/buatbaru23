@@ -29,4 +29,6 @@ async function notify(studioId, sesiId, jenis, pesan, { email = true } = {}) {
   }
 }
 
+require('./integrasi').onChange(() => { transporter = null; });
+
 module.exports = { notify };

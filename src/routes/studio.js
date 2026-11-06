@@ -11,7 +11,8 @@ const images = require('../images');
 const S = require('../sesi');
 const F = require('../../public/shared/format');
 const { randomToken, sha256, encrypt, decrypt, randomPin, hashPin } = require('../security');
-const { hashPassword, checkPassword, createLogin, destroyLogin, currentUser, requireUser, requireSuperadmin, can } = require('../auth');
+const { hashPassword, checkPassword, createLogin, destroyLogin, currentUser, requireUser, requireSuperadmin, requireSudo, grantSudo, can } = require('../auth');
+const integrasi = require('../integrasi');
 const QRCode = require('qrcode');
 const { HttpError, bad, forbidden, notFound, ah, str, int, bool, setCookie } = require('../http');
 const { limit } = require('../ratelimit');
@@ -111,11 +112,11 @@ r.post('/auth/login', limit('auth', 20, 15 * 60), limit('login_email', 10, 15 * 
 }));
 
 // Masuk/daftar dengan Google (ID token dari Google Identity Services)
-async function verifyGoogle(credential) {
+async function verifyGoogle(credential, audience = config.googleClientId) {
   const resp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
   const info = await resp.json().catch(() => ({}));
   const okIss = ['accounts.google.com', 'https://accounts.google.com'].includes(info.iss);
-  if (!resp.ok || !okIss || info.aud !== config.googleClientId || String(info.email_verified) !== 'true' || !info.sub || !info.email
+  if (!resp.ok || !okIss || !audience || info.aud !== audience || String(info.email_verified) !== 'true' || !info.sub || !info.email
     || Number(info.exp) * 1000 < Date.now()) {
     throw bad('Login Google gagal. Coba lagi.');
   }
@@ -1254,6 +1255,65 @@ r.put('/admin/qris', requireSuperadmin(), ah(async (req, res) => {
   await audit(req, 'ubah_qris', null, { gambar: !!req.body.data_url });
   res.json({ ok: true });
 }));
+// ---------- Integrasi & kunci API (super admin + sudo mode) ----------
+// Konfirmasi identitas ulang: login Google lagi (atau kata sandi bila mode sandi aktif)
+r.post('/admin/sudo', requireSuperadmin(), limit('sudo', 10, 15 * 60, (req) => `${req.user.id}`), ah(async (req, res) => {
+  const u = await db.one('SELECT id, email, google_sub, password_hash FROM users WHERE id=$1', [req.user.id]);
+  if (req.body.credential) {
+    if (!config.googleClientId) throw bad('Login Google belum dikonfigurasi.');
+    const g = await verifyGoogle(str(req.body.credential, { max: 4096 }));
+    // Harus akun Google yang sama persis dengan akun super admin ini
+    if (!u.google_sub || g.sub !== u.google_sub) {
+      await audit(req, 'sudo_gagal', null, { metode: 'google' });
+      throw forbidden('Akun Google berbeda dengan akun super admin ini.');
+    }
+  } else if (req.body.password !== undefined) {
+    if (!config.passwordLogin || !u.password_hash) throw bad('Konfirmasi dengan Google.');
+    if (!(await checkPassword(String(req.body.password), u.password_hash))) {
+      await audit(req, 'sudo_gagal', null, { metode: 'sandi' });
+      throw bad('Kata sandi salah.');
+    }
+  } else throw bad('Konfirmasi identitas dibutuhkan.');
+  const sampai = await grantSudo(req.user);
+  await audit(req, 'sudo', null, { ip: req.ip });
+  res.json({ ok: true, sampai });
+}));
+r.post('/admin/sudo/kunci', requireSuperadmin(), ah(async (req, res) => {
+  await db.q('UPDATE user_sessions SET sudo_sampai=NULL WHERE token_hash=$1', [req.user.sid]);
+  res.json({ ok: true });
+}));
+r.get('/admin/integrasi', requireSuperadmin(), ah(async (req, res) => {
+  const sudoAktif = req.user.sudo_sampai && new Date(req.user.sudo_sampai) > Date.now();
+  res.json({ sudo_sampai: sudoAktif ? req.user.sudo_sampai : null, metode_sudo: config.passwordLogin ? 'sandi' : 'google',
+    google_client_id: config.googleClientId || null, ip: req.ip,
+    grup: sudoAktif ? integrasi.summary() : null });
+}));
+r.put('/admin/integrasi/:k', requireSuperadmin(), requireSudo(), limit('integrasi', 60, 3600, (req) => `${req.user.id}`), ah(async (req, res) => {
+  if (req.params.k === 'google_client_id') {
+    // Cegah semua orang terkunci di luar: Client ID baru wajib dibuktikan dengan login Google memakai Client ID itu,
+    // oleh akun super admin yang sama.
+    const nilai = str(req.body.nilai, { required: true, max: 200, name: 'Client ID' });
+    if (!req.body.credential) throw bad('Masuk dengan Google memakai Client ID baru untuk membuktikan Client ID berfungsi.', { butuh_bukti: true });
+    const g = await verifyGoogle(str(req.body.credential, { max: 4096 }), nilai);
+    const u = await db.one('SELECT google_sub, email FROM users WHERE id=$1', [req.user.id]);
+    if (u.google_sub ? g.sub !== u.google_sub : g.email !== String(u.email).toLowerCase()) throw forbidden('Bukti login harus dari akun super admin ini.');
+    if (!u.google_sub) await db.q('UPDATE users SET google_sub=$2 WHERE id=$1', [req.user.id, g.sub]);
+  }
+  await integrasi.setValue(req.params.k, req.body.nilai, req.user.email);
+  await audit(req, 'ubah_integrasi', null, { kunci: req.params.k, ip: req.ip }); // nilai TIDAK pernah dicatat
+  res.json({ ok: true, grup: integrasi.summary() });
+}));
+r.delete('/admin/integrasi/:k', requireSuperadmin(), requireSudo(), ah(async (req, res) => {
+  await integrasi.clearValue(req.params.k);
+  await audit(req, 'hapus_integrasi', null, { kunci: req.params.k, ip: req.ip });
+  res.json({ ok: true, grup: integrasi.summary() });
+}));
+r.post('/admin/integrasi/tes/:grup', requireSuperadmin(), requireSudo(), limit('integrasi_tes', 30, 3600, (req) => `${req.user.id}`), ah(async (req, res) => {
+  const out = await integrasi.test(req.params.grup);
+  await audit(req, 'tes_integrasi', null, { grup: req.params.grup, ok: out.ok });
+  res.json(out);
+}));
+
 r.get('/admin/audit', requireSuperadmin(), ah(async (req, res) => {
   res.json(await db.many(`SELECT a.*, st.nama AS studio_nama FROM admin_audit a LEFT JOIN studios st ON st.id=a.studio_id ORDER BY a.waktu DESC LIMIT 200`));
 }));

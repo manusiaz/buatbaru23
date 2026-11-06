@@ -120,6 +120,21 @@ Audit keamanan independen dijalankan (exploit dicoba langsung). Semua temuan sud
 
 Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat API, CSRF, path traversal, tanda tangan URL media, SSRF.
 
+### Integrasi & kunci API (satu halaman)
+
+Menu **Integrasi & kunci API** (khusus super admin) mengatur semua kredensial dari satu tempat: Google (Client ID, API key, service account, App ID), Midtrans, WhatsApp Cloud API, SMTP, dan kontak keamanan. Nilai di halaman ini mengalahkan `.env`; `.env` tetap jadi cadangan. Perubahan langsung berlaku tanpa restart, dan semua instance memuat ulang tiap menit.
+
+Pengaman:
+- **Sudo mode**: halaman terkunci sampai super admin mengonfirmasi identitas lagi (login Google dengan akun yang sama; kata sandi bila mode sandi). Akses berlaku 10 menit per sesi login, lalu terkunci otomatis; bisa dikunci manual.
+- **Rahasia terenkripsi** AES-256-GCM di database (kunci turunan `APP_SECRET`, terpisah dari enkripsi lain) dan **tidak pernah dikirim ke browser**: hanya 4 karakter terakhir, sumber (database/env), siapa & kapan mengubah.
+- **Validasi format** tiap kunci sebelum disimpan, plus **Tes koneksi** dari server (Google, Midtrans, WhatsApp, SMTP).
+- **Client ID Google baru wajib dibuktikan** dengan login Google memakai Client ID itu oleh akun super admin yang sama, jadi Client ID salah tidak bisa membuat semua orang terkunci.
+- **Audit**: setiap konfirmasi identitas (berhasil/gagal), perubahan, penghapusan, dan tes tercatat dengan nama kunci & IP; nilai tidak pernah dicatat.
+- **Batasi IP admin** (opsional, hanya lewat `.env` agar tidak bisa mengunci diri sendiri): `ADMIN_IP_ALLOWLIST=203.0.113.5,10.0.0.0/8`.
+- **Pemulihan darurat** di server: `node scripts/integrasi.js daftar` / `node scripts/integrasi.js hapus google_client_id`.
+
+Catatan: karena rahasia dienkripsi dengan `APP_SECRET`, mengganti `APP_SECRET` membuat nilai yang tersimpan tidak terbaca (harus diisi ulang).
+
 ### Login & akun
 
 - **Login studio hanya lewat Google** (bila `GOOGLE_CLIENT_ID` diisi). Aplikasi tidak menyimpan kata sandi; verifikasi email, verifikasi 2 langkah, dan pemulihan akun diurus Google. Token Google dicek: penerbit, `aud` = client ID-mu, email terverifikasi, belum kedaluwarsa.
@@ -138,7 +153,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000 (NODE_ENV=development)
 ```
 
-Tes integrasi (34 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (37 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

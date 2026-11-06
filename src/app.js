@@ -48,6 +48,12 @@ function createApp() {
   const bigBody = /^\/api\/(studio\/logo|langganan\/topup\/\d+\/bukti|admin\/qris|sesis\/massal)$/;
   app.use((req, res, next) => express.json({ limit: bigBody.test(req.path) ? '5mb' : '256kb' })(req, res, next));
 
+  // Muat setting integrasi dari database sekali sebelum request pertama
+  let integrasiSiap = null;
+  app.use((req, res, next) => {
+    if (!integrasiSiap) integrasiSiap = require('./integrasi').reload().catch((e) => { integrasiSiap = null; throw e; });
+    integrasiSiap.then(() => next(), next);
+  });
   app.use('/api/webhooks', require('./routes/webhooks'));
   app.use('/api', require('./routes/studio'));
   app.use('/g/:token/api', require('./routes/client'));

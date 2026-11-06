@@ -615,7 +615,8 @@ test('login Google saja: kata sandi ditolak; undangan wajib email Google yang sa
     assert.equal((await t.call('GET', '/api/audit-keamanan')).status, 403, 'editor tidak bisa membaca log keamanan');
   } finally {
     global.fetch = oldFetch;
-    [config.passwordLogin, config.googleClientId] = oldCfg;
+    config.passwordLogin = null;
+    config.googleClientId = oldCfg[1];
   }
 });
 
@@ -648,4 +649,112 @@ test('batas ukuran body & security.txt', async () => {
   assert.match(await sec.text(), /^Contact: /m);
   const h = await fetch(base + '/');
   assert.match(h.headers.get('content-security-policy') || '', /object-src 'none'/);
+});
+
+// ======================= Halaman integrasi & kunci API =======================
+test('integrasi: hanya super admin + sudo; rahasia terenkripsi & tidak pernah dikirim ke browser', async () => {
+  const integ = require('../src/integrasi');
+  const oldKey = config.midtransServerKey;
+  try {
+    const biasa = await owner();
+    assert.equal((await biasa.call('GET', '/api/admin/integrasi')).status, 403, 'bukan super admin');
+    const sa = await owner();
+    const me = (await sa.call('GET', '/api/me')).body;
+    await db.q('UPDATE users SET superadmin=true WHERE id=$1', [me.user.id]);
+    let d = (await sa.call('GET', '/api/admin/integrasi')).body;
+    assert.equal(d.grup, null, 'tanpa sudo tidak ada data');
+    const secret = 'SB-Mid-server-' + crypto.randomBytes(12).toString('hex');
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/midtrans_server_key', { nilai: secret })).status, 403, 'ubah tanpa sudo ditolak');
+    assert.equal((await sa.call('POST', '/api/admin/sudo', { password: 'salah-sekali' })).status, 400);
+    assert.equal((await sa.call('POST', '/api/admin/sudo', { password: 'rahasia123' })).status, 200);
+    // Validasi format
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/midtrans_server_key', { nilai: 'bukan-key' })).status, 400);
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/google_service_account_json', { nilai: '{"type":"x"}' })).status, 400);
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/kunci_ngawur', { nilai: 'x' })).status, 400);
+    // Simpan rahasia: terpakai di config, terenkripsi di DB, tidak ada di respons
+    const put = await sa.call('PUT', '/api/admin/integrasi/midtrans_server_key', { nilai: secret });
+    assert.equal(put.status, 200);
+    assert.equal(config.midtransServerKey, secret, 'langsung dipakai tanpa restart');
+    assert.ok(!JSON.stringify(put.body).includes(secret));
+    d = (await sa.call('GET', '/api/admin/integrasi')).body;
+    assert.ok(!JSON.stringify(d).includes(secret), 'rahasia tidak dikirim ke browser');
+    const f = d.grup.find((g) => g.grup === 'midtrans').fields.find((x) => x.k === 'midtrans_server_key');
+    assert.equal(f.samaran, '••••' + secret.slice(-4));
+    assert.equal(f.sumber, 'database');
+    const row = await db.one("SELECT nilai FROM platform_settings WHERE kunci='int:midtrans_server_key'");
+    assert.ok(!row.nilai.includes(secret) && row.nilai.startsWith('v1:'), 'tersimpan terenkripsi');
+    assert.equal(integ._dec(row.nilai), secret);
+    // Audit mencatat kunci, tidak mencatat nilai
+    const aud = (await sa.call('GET', '/api/admin/audit')).body;
+    assert.ok(aud.some((a) => a.aksi === 'ubah_integrasi' && a.detail.kunci === 'midtrans_server_key'));
+    assert.ok(!JSON.stringify(aud).includes(secret));
+    // Nilai non-rahasia ditampilkan apa adanya
+    await sa.call('PUT', '/api/admin/integrasi/security_contact', { nilai: 'mailto:sec@contoh.id' });
+    assert.match(await (await fetch(base + '/.well-known/security.txt')).text(), /mailto:sec@contoh\.id/);
+    // Hapus kembali ke nilai env
+    assert.equal((await sa.call('DELETE', '/api/admin/integrasi/midtrans_server_key')).status, 200);
+    assert.equal(config.midtransServerKey, oldKey);
+    // Sudo kedaluwarsa → terkunci lagi
+    await db.q('UPDATE user_sessions SET sudo_sampai = now() - interval \'1 second\' WHERE user_id=$1', [me.user.id]);
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/security_contact', { nilai: 'mailto:x@y.id' })).status, 403);
+    assert.equal((await sa.call('GET', '/api/admin/integrasi')).body.grup, null);
+    // Sudo milik satu sesi login tidak berlaku di sesi login lain
+    await sa.call('POST', '/api/admin/sudo', { password: 'rahasia123' });
+    const sa2 = new Client();
+    await sa2.call('POST', '/api/auth/login', { email: me.user.email, password: 'rahasia123' });
+    assert.equal((await sa2.call('PUT', '/api/admin/integrasi/security_contact', { nilai: 'mailto:x@y.id' })).status, 403);
+    await integ.clearValue('security_contact');
+  } finally { config.midtransServerKey = oldKey; }
+});
+
+test('integrasi: sudo via Google wajib akun Google yang sama', async () => {
+  const oldFetch = global.fetch;
+  const oldCid = config.googleClientId;
+  global.fetch = async (url, opts) => {
+    const u = String(url);
+    if (!u.startsWith('https://oauth2.googleapis.com/tokeninfo')) return oldFetch(url, opts);
+    const [sub, email] = new URL(u).searchParams.get('id_token').split(':');
+    return new Response(JSON.stringify({ iss: 'accounts.google.com', aud: 'cid-sudo', sub, email, email_verified: 'true', exp: String(Math.floor(Date.now() / 1000) + 600) }), { status: 200 });
+  };
+  config.googleClientId = 'cid-sudo';
+  try {
+    const sub = 'sudo' + Date.now();
+    const a = new Client();
+    await a.call('POST', '/api/auth/google', { credential: `${sub}:${sub}@gmail.com`, studio_nama: 'HQ' });
+    const me = (await a.call('GET', '/api/me')).body;
+    await db.q('UPDATE users SET superadmin=true WHERE id=$1', [me.user.id]);
+    assert.equal((await a.call('POST', '/api/admin/sudo', { credential: `orang-lain:${sub}@gmail.com` })).status, 403, 'Google akun lain ditolak');
+    assert.equal((await a.call('POST', '/api/admin/sudo', { password: 'apa-saja' })).status, 400, 'mode Google: kata sandi tidak diterima');
+    assert.equal((await a.call('POST', '/api/admin/sudo', { credential: `${sub}:${sub}@gmail.com` })).status, 200);
+    assert.ok((await a.call('GET', '/api/admin/integrasi')).body.grup);
+  } finally { global.fetch = oldFetch; config.googleClientId = oldCid; }
+});
+
+test('integrasi: Client ID Google baru wajib dibuktikan dengan login memakai Client ID itu', async () => {
+  const oldFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    const u = String(url);
+    if (!u.startsWith('https://oauth2.googleapis.com/tokeninfo')) return oldFetch(url, opts);
+    const [aud, sub, email] = new URL(u).searchParams.get('id_token').split('|');
+    return new Response(JSON.stringify({ iss: 'accounts.google.com', aud, sub, email, email_verified: 'true', exp: String(Math.floor(Date.now() / 1000) + 600) }), { status: 200 });
+  };
+  const integ = require('../src/integrasi');
+  try {
+    const sa = await owner();
+    const me = (await sa.call('GET', '/api/me')).body;
+    await db.q('UPDATE users SET superadmin=true WHERE id=$1', [me.user.id]);
+    await sa.call('POST', '/api/admin/sudo', { password: 'rahasia123' });
+    const cid = '123456-abcdef.apps.googleusercontent.com';
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/google_client_id', { nilai: cid })).status, 400, 'tanpa bukti ditolak');
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/google_client_id', { nilai: cid, credential: `lain.apps.googleusercontent.com|s1|${me.user.email}` })).status, 400, 'token untuk Client ID lain ditolak');
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/google_client_id', { nilai: cid, credential: `${cid}|s1|orang@lain.com` })).status, 403, 'akun Google lain ditolak');
+    assert.equal(config.googleClientId, '', 'belum berubah');
+    assert.equal((await sa.call('PUT', '/api/admin/integrasi/google_client_id', { nilai: cid, credential: `${cid}|s1|${me.user.email}` })).status, 200);
+    assert.equal(config.googleClientId, cid);
+    assert.equal(config.passwordLogin, false, 'login kata sandi otomatis mati setelah Client ID aktif');
+  } finally {
+    global.fetch = oldFetch;
+    await integ.clearValue('google_client_id');
+  }
+  assert.equal(config.passwordLogin, true);
 });

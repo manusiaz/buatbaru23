@@ -8,6 +8,9 @@ const retensi = require('./retensi');
 
 async function main() {
   await db.migrate();
+  const integrasi = require('./integrasi');
+  await integrasi.reload();
+  integrasi.start();
   await sesi.compensateDowntime();
   await sesi.heartbeat();
   sesi.startBackground();
