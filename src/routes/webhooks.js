@@ -25,21 +25,6 @@ r.post('/midtrans', ah(async (req, res) => {
     } else if (['expire', 'cancel', 'deny'].includes(n.transaction_status)) {
       await db.q('UPDATE tagihans SET payment_url=NULL, order_id=NULL WHERE sesi_id=$1 AND order_id=$2', [t.sesi_id, orderId]);
     }
-  } else if (orderId.startsWith('GS-I-')) {
-    await db.tx(async (c) => {
-      const inv = (await c.query('SELECT * FROM invoices WHERE order_id=$1 FOR UPDATE', [orderId])).rows[0];
-      if (!inv || inv.status === 'lunas') return;
-      if (paid && amount === Number(inv.jumlah)) {
-        await c.query("UPDATE invoices SET status='lunas', dibayar_pada=now() WHERE id=$1", [inv.id]);
-        if (inv.jenis === 'kredit') await c.query('UPDATE studios SET kredit_sesi=kredit_sesi+$2 WHERE id=$1', [inv.studio_id, inv.kredit]);
-        else {
-          await c.query(`UPDATE studios SET plan=$2, plan_sampai = (CASE WHEN plan=$2 AND plan_sampai > now() THEN plan_sampai ELSE now() END) + ($3 || ' months')::interval
-            WHERE id=$1`, [inv.studio_id, inv.plan, String(inv.bulan)]);
-        }
-      } else if (['expire', 'cancel', 'deny'].includes(n.transaction_status)) {
-        await c.query("UPDATE invoices SET status='batal' WHERE id=$1", [inv.id]);
-      }
-    });
   }
   res.json({ ok: true });
 }));

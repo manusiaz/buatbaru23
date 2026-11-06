@@ -70,7 +70,7 @@ Tanpa variabel di atas, aplikasi tetap jalan dengan sumber **Foto contoh**. Pili
 | F-43 | Link hasil akhir: simpan, kirim via WhatsApp, tampil di galeri pelanggan | Detail sesi › Hasil akhir |
 | F-44 / S9 | Laporan: sesi, waktu sampai pilihan masuk, % tepat waktu, % minta perpanjangan, pendapatan foto tambahan, per hari/cabang/paket + CSV | Laporan |
 | F-45 / S10 | Mode kiosk: daftar sesi hari ini, buka tanpa PIN, timer mulai otomatis, selesai kembali ke kiosk | Mode kiosk |
-| F-46 | Langganan Gratis/Starter/Pro/Bisnis: batas sesi & pengguna, gating fitur, kredit sesi musiman, bayar via Midtrans | Langganan (aktif bila `BILLING_ENABLED=true`) |
+| F-46 | Langganan Gratis/Starter/Pro/Bisnis (batas sesi & pengguna, gating fitur) dibayar dari **saldo**. Saldo di-top up lewat **QRIS statis** + kode unik, dikonfirmasi manual oleh super admin. Perpanjang otomatis dari saldo, buku besar mutasi saldo | Langganan (aktif bila `BILLING_ENABLED=true`), Super admin |
 | F-50 | Tempel teks chat, nomor & link dikenali | Pilihan masuk |
 
 **V2 (P2)**
@@ -81,7 +81,9 @@ Tanpa variabel di atas, aplikasi tetap jalan dengan sumber **Foto contoh**. Pili
 | F-12 | Buat sesi massal dari CSV (nama, no_wa, link_folder, paket, judul, tanggal, pin), salin semua link+PIN, kirim WA per baris | Galeri › Buat massal (CSV) |
 | F-36 | Harga bertingkat foto tambahan (mis. `5=100000`); sistem memilih total termurah | Paket & harga, buat/ubah sesi |
 
-**Super admin** (`SUPERADMIN_EMAILS`): ringkasan platform, daftar tenant, ubah paket/masa berlaku/kredit, tangguhkan studio, log audit.
+**Super admin** (`SUPERADMIN_EMAILS`): ringkasan platform, unggah QRIS statis, setujui/tolak top up (lihat bukti transfer), koreksi saldo dengan alasan, daftar tenant, ubah paket/masa berlaku, tangguhkan studio, log audit.
+
+**Pengaman saldo:** saldo hanya bertambah lewat persetujuan super admin; persetujuan & pembayaran berjalan dalam transaksi database dengan row lock (persetujuan ganda / pemakaian saldo ganda secara paralel diuji); constraint `saldo >= 0`; buku besar `saldo_mutasi` tidak bisa di-UPDATE/DELETE (trigger); nominal top up hanya dari daftar tetap; bukti transfer di-encode ulang dan hanya bisa dilihat studio pemiliknya & super admin; semua aksi super admin masuk audit.
 
 Keamanan & non-fungsional: RBAC ditegakkan di server, rate limit, cookie HttpOnly/SameSite, mutasi hanya JSON, ID/link Drive tidak pernah sampai ke browser pelanggan, webhook diverifikasi signature SHA-512, token WA studio dienkripsi, retensi pratinjau otomatis dan log 12 bulan, hapus galeri beserta data pelanggan (UU PDP), halaman `/privasi`.
 
@@ -90,7 +92,7 @@ Keamanan & non-fungsional: RBAC ditegakkan di server, rate limit, cookie HttpOnl
 Semua fitur di atas jalan tanpa kredensial pihak ketiga **kecuali** yang memang memanggil layanan luar. Yang ini sudah ditulis lengkap tapi **belum pernah dites ke layanan aslinya**, jadi uji dulu dengan akun sandbox:
 
 - **Google Drive** (service account, link publik, Picker, salin ke "Terpilih").
-- **Midtrans**: pakai sandbox dulu (`MIDTRANS_PRODUCTION=false`), set Payment Notification URL ke `{BASE_URL}/api/webhooks/midtrans`.
+- **Midtrans** (hanya untuk pelanggan membayar foto tambahan ke studio): pakai sandbox dulu (`MIDTRANS_PRODUCTION=false`), set Payment Notification URL ke `{BASE_URL}/api/webhooks/midtrans`.
 - **WhatsApp Cloud API**: pesan pembuka ke pelanggan wajib memakai template yang disetujui Meta (`WA_TEMPLATE_LINK`, `WA_TEMPLATE_HASIL`). Tanpa template, pesan dikirim sebagai teks biasa dan hanya sampai bila pelanggan pernah chat ke nomor itu dalam 24 jam terakhir.
 
 Tanpa kredensial, tombolnya disembunyikan atau memberi pesan jelas, dan alur manual (wa.me, bayar di kasir) tetap jalan.
@@ -103,7 +105,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000
 ```
 
-Tes integrasi (21 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (22 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

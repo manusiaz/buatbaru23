@@ -32,18 +32,15 @@ async function usage(studioId) {
   return r;
 }
 
-// Dipanggil di dalam transaksi pembuatan sesi: pakai kuota bulanan, lalu kredit musiman.
+// Dipanggil di dalam transaksi pembuatan sesi. Kunci baris studio agar pembuatan paralel tidak melewati kuota.
 async function consumeSession(c, studio, n = 1) {
   if (!config.billingEnabled) return;
   const plan = PLANS[effectivePlan(studio)];
   if (plan.sesi === Infinity) return;
+  await c.query('SELECT 1 FROM studios WHERE id=$1 FOR UPDATE', [studio.id]);
   const used = (await c.query("SELECT count(*)::int AS n FROM sesis WHERE studio_id=$1 AND dibuat_pada >= date_trunc('month', now())", [studio.id])).rows[0].n;
-  const sisa = Math.max(0, plan.sesi - used);
-  if (sisa >= n) return;
-  const butuhKredit = n - sisa;
-  const u = await c.query('UPDATE studios SET kredit_sesi = kredit_sesi - $2 WHERE id=$1 AND kredit_sesi >= $2 RETURNING kredit_sesi', [studio.id, butuhKredit]);
-  if (!u.rowCount) {
-    throw new HttpError(402, `Kuota ${plan.sesi} sesi/bulan paket ${plan.nama} habis. Upgrade paket atau beli kredit sesi musiman.`, { upgrade: true });
+  if (used + n > plan.sesi) {
+    throw new HttpError(402, `Kuota ${plan.sesi} sesi/bulan paket ${plan.nama} habis. Upgrade paket (dibayar dari saldo).`, { upgrade: true });
   }
 }
 
@@ -62,7 +59,7 @@ function summary(studio) {
     billing: config.billingEnabled, plan: key, nama: p.nama, harga: p.harga, plan_sampai: studio.plan_sampai,
     batas_sesi: p.sesi === Infinity ? null : p.sesi, batas_pengguna: p.pengguna === Infinity ? null : p.pengguna,
     fitur: Object.fromEntries(Object.keys(FITUR_NAMA).map((f) => [f, p.fitur.includes(f)])),
-    label_produk: !!p.label && config.billingEnabled, kredit_sesi: studio.kredit_sesi,
+    label_produk: !!p.label && config.billingEnabled, saldo: Number(studio.saldo || 0), perpanjang_otomatis: studio.perpanjang_otomatis,
   };
 }
 

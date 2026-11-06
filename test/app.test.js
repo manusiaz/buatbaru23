@@ -279,17 +279,14 @@ test('F-36 harga bertingkat: total termurah dihitung server', async () => {
   assert.equal(F.hargaTambahan(4, 25000, [{ jumlah: 5, harga: 100000 }]), 100000);
 });
 
-test('F-46 langganan: kuota sesi paket gratis, kredit musiman, gating fitur', async () => {
+test('F-46 langganan: kuota sesi paket gratis & gating fitur', async () => {
   config.billingEnabled = true;
   try {
     const c = await owner();
-    for (let i = 0; i < 10; i++) assert.equal((await c.call('POST', '/api/sesis', { pelanggan_nama: 'P' + i, sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
-    const over = await c.call('POST', '/api/sesis', { pelanggan_nama: 'X', sumber: 'contoh', jumlah_contoh: 2 });
-    assert.equal(over.status, 402);
+    const many = await Promise.all(Array.from({ length: 12 }, (_, i) => c.call('POST', '/api/sesis', { pelanggan_nama: 'P' + i, sumber: 'contoh', jumlah_contoh: 2 })));
+    assert.equal(many.filter((r) => r.status === 200).length, 10, 'pembuatan paralel tidak boleh melewati kuota 10');
+    assert.equal(many.filter((r) => r.status === 402).length, 2);
     const me = (await c.call('GET', '/api/me')).body;
-    await db.q('UPDATE studios SET kredit_sesi=1 WHERE id=$1', [me.studio.id]);
-    assert.equal((await c.call('POST', '/api/sesis', { pelanggan_nama: 'Y', sumber: 'contoh', jumlah_contoh: 2 })).status, 200);
-    assert.equal((await db.one('SELECT kredit_sesi FROM studios WHERE id=$1', [me.studio.id])).kredit_sesi, 0);
     assert.equal((await c.call('GET', '/api/laporan')).status, 402);
     assert.equal((await c.call('POST', '/api/tim/undang', { email: `z${Date.now()}@x.id`, peran: 'admin' })).status, 402, 'gratis = 1 pengguna');
     await db.q("UPDATE studios SET plan='pro', plan_sampai=now() + interval '1 month' WHERE id=$1", [me.studio.id]);
@@ -297,6 +294,50 @@ test('F-46 langganan: kuota sesi paket gratis, kredit musiman, gating fitur', as
     await db.q("UPDATE studios SET plan_sampai=now() - interval '1 day' WHERE id=$1", [me.studio.id]);
     assert.equal((await c.call('GET', '/api/laporan')).status, 402, 'paket kedaluwarsa kembali ke gratis');
   } finally { config.billingEnabled = false; }
+});
+
+test('saldo: top up QRIS manual, persetujuan super admin sekali saja, bayar paket dari saldo', async () => {
+  config.billingEnabled = true;
+  const admin = await owner();
+  const meA = (await admin.call('GET', '/api/me')).body;
+  config.superadminEmails.push(meA.user.email.toLowerCase());
+  try {
+    const png = 'data:image/png;base64,' + (await require('sharp')({ create: { width: 40, height: 40, channels: 3, background: '#fff' } }).png().toBuffer()).toString('base64');
+    const c = await owner();
+    const me = (await c.call('GET', '/api/me')).body;
+    assert.equal((await c.call('POST', '/api/langganan/topup', { nominal: 100000 })).status, 400, 'QRIS belum disiapkan');
+    assert.equal((await c.call('PUT', '/api/admin/qris', { data_url: png, nama_penerima: 'PT Uji' })).status, 403, 'studio biasa bukan super admin');
+    assert.equal((await admin.call('PUT', '/api/admin/qris', { data_url: png, nama_penerima: 'PT Uji' })).status, 200);
+    assert.equal((await c.call('POST', '/api/langganan/topup', { nominal: 12345 })).status, 400, 'nominal di luar daftar ditolak');
+    assert.equal((await c.call('POST', '/api/langganan/topup', { nominal: -100000 })).status, 400);
+    const t = (await c.call('POST', '/api/langganan/topup', { nominal: 250000 })).body;
+    assert.equal(t.jumlah_transfer, 250000 + t.kode_unik);
+    assert.equal((await c.call('POST', `/api/langganan/topup/${t.id}/bukti`, { data_url: png })).status, 200);
+    assert.equal((await c.call('POST', `/api/admin/topups/${t.id}/setujui`)).status, 403, 'studio tidak bisa menyetujui top up sendiri');
+    // Persetujuan ganda paralel hanya menambah saldo sekali
+    const both = await Promise.all([admin.call('POST', `/api/admin/topups/${t.id}/setujui`), admin.call('POST', `/api/admin/topups/${t.id}/setujui`)]);
+    assert.deepEqual(both.map((x) => x.status).sort(), [200, 400]);
+    let st = await db.one('SELECT saldo FROM studios WHERE id=$1', [me.studio.id]);
+    assert.equal(Number(st.saldo), t.jumlah_transfer);
+    // Studio lain tidak bisa melihat bukti top up ini
+    const other = await owner();
+    const b = await fetch(`${base}/api/langganan/topup/${t.id}/bukti`, { headers: { cookie: Object.entries(other.jar).map(([k, v]) => `${k}=${v}`).join('; ') } });
+    assert.equal(b.status, 404);
+    // Bayar paket: saldo kurang → 402; cukup → paket aktif, saldo terpotong
+    assert.equal((await c.call('POST', '/api/langganan/bayar', { plan: 'pro', bulan: 1 })).status, 402);
+    assert.equal((await c.call('POST', '/api/langganan/bayar', { plan: 'bisnis', bulan: 1 })).status, 400);
+    const pay = await Promise.all([c.call('POST', '/api/langganan/bayar', { plan: 'starter', bulan: 1 }), c.call('POST', '/api/langganan/bayar', { plan: 'starter', bulan: 1 })]);
+    assert.deepEqual(pay.map((x) => x.status).sort(), [200, 402], 'saldo tidak bisa dipakai dua kali');
+    st = await db.one('SELECT saldo, plan FROM studios WHERE id=$1', [me.studio.id]);
+    assert.equal(st.plan, 'starter');
+    assert.equal(Number(st.saldo), t.jumlah_transfer - 149000);
+    // Saldo tidak bisa minus, buku besar tidak bisa diubah
+    assert.equal((await admin.call('POST', `/api/admin/studios/${me.studio.id}/koreksi`, { jumlah: -999999999, keterangan: 'x' })).status, 400);
+    await assert.rejects(db.q('UPDATE saldo_mutasi SET jumlah=999999 WHERE studio_id=$1', [me.studio.id]));
+    await assert.rejects(db.q('UPDATE studios SET saldo=-1 WHERE id=$1', [me.studio.id]));
+    const m = (await c.call('GET', '/api/langganan')).body.mutasi.map((x) => x.jenis);
+    assert.deepEqual(m, ['bayar_paket', 'topup']);
+  } finally { config.billingEnabled = false; config.superadminEmails.length = 0; }
 });
 
 test('F-05 multi-cabang: user cabang hanya melihat sesi cabangnya; laporan per cabang', async () => {
@@ -362,7 +403,7 @@ test('F-17 QR & F-43 hasil akhir tampil di galeri pelanggan', async () => {
   assert.equal((await p.call('GET', `/g/${s.token}/api/info`)).body.hasil_link, 'https://drive.google.com/drive/folders/hasil');
 });
 
-test('F-35 webhook Midtrans: signature diverifikasi, tagihan & langganan jadi lunas', async () => {
+test('F-35 webhook Midtrans: signature diverifikasi, tagihan foto tambahan jadi lunas', async () => {
   const oldKey = config.midtransServerKey;
   config.midtransServerKey = 'SB-Mid-server-test';
   const sign = (n) => ({ ...n, signature_key: crypto.createHash('sha512').update(`${n.order_id}${n.status_code}${n.gross_amount}${config.midtransServerKey}`).digest('hex') });
@@ -379,13 +420,6 @@ test('F-35 webhook Midtrans: signature diverifikasi, tagihan & langganan jadi lu
     const t = (await c.call('GET', `/api/sesis/${s.id}`)).body.tagihan;
     assert.equal(t.status_bayar, 'lunas');
     assert.equal(t.metode, 'QRIS');
-    // Langganan
-    const me = (await c.call('GET', '/api/me')).body;
-    await db.q("INSERT INTO invoices(studio_id, jenis, plan, bulan, jumlah, order_id) VALUES ($1,'plan','pro',1,399000,'GS-I-test-9')", [me.studio.id]);
-    await p.call('POST', '/api/webhooks/midtrans', sign({ order_id: 'GS-I-test-9', status_code: '200', gross_amount: '399000.00', transaction_status: 'settlement', payment_type: 'bank_transfer' }));
-    const st = await db.one('SELECT plan, plan_sampai FROM studios WHERE id=$1', [me.studio.id]);
-    assert.equal(st.plan, 'pro');
-    assert.ok(new Date(st.plan_sampai) > Date.now() + 27 * 86400000);
   } finally { config.midtransServerKey = oldKey; }
 });
 
@@ -399,7 +433,7 @@ test('super admin: tangguhkan studio memblokir login studio itu', async () => {
     assert.equal((await other.call('GET', '/api/admin/studios')).status, 403);
     const list = (await admin.call('GET', '/api/admin/studios')).body;
     assert.ok(list.some((x) => x.id === meO.studio.id));
-    assert.equal((await admin.call('PUT', `/api/admin/studios/${meO.studio.id}`, { aktif: false, tambah_kredit: 50 })).status, 200);
+    assert.equal((await admin.call('PUT', `/api/admin/studios/${meO.studio.id}`, { aktif: false })).status, 200);
     assert.equal((await other.call('GET', '/api/me')).status, 401);
     assert.ok((await admin.call('GET', '/api/admin/audit')).body.some((a) => a.aksi === 'ubah_studio'));
   } finally { config.superadminEmails.length = 0; }

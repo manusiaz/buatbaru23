@@ -29,8 +29,8 @@ const config = {
   // Langganan (F-46). false = semua fitur terbuka tanpa batas (cocok untuk satu studio sendiri)
   billingEnabled: /^(1|true)$/i.test(env.BILLING_ENABLED || ''),
   superadminEmails: String(env.SUPERADMIN_EMAILS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
-  kreditPaket: int(env.KREDIT_PAKET_SESI, 100),
-  kreditHarga: int(env.KREDIT_PAKET_HARGA, 149000),
+  // Nominal top up saldo yang boleh dipilih (Rupiah)
+  topupNominal: String(env.TOPUP_NOMINAL || '50000,100000,250000,500000,1000000').split(',').map((x) => parseInt(x, 10)).filter((x) => x > 0 && x <= 100000000),
   // Payment gateway Midtrans (F-35)
   midtransServerKey: env.MIDTRANS_SERVER_KEY || '',
   midtransClientKey: env.MIDTRANS_CLIENT_KEY || '',

@@ -18,6 +18,7 @@ const { limit } = require('../ratelimit');
 const plans = require('../plans');
 const wa = require('../wa');
 const payment = require('../payment');
+const saldo = require('../saldo');
 
 const r = express.Router();
 
@@ -1009,38 +1010,73 @@ r.get('/laporan.csv', requireUser('sesi.kelola'), ah(async (req, res) => {
   res.send('﻿' + lines.join('\r\n') + '\r\n');
 }));
 
-// ---------- Langganan & tagihan studio (F-46) ----------
+// ---------- Langganan dibayar dari saldo; saldo di-top up lewat QRIS statis (F-46) ----------
+async function platformSetting(k) { const r = await db.one('SELECT nilai FROM platform_settings WHERE kunci=$1', [k]); return r ? r.nilai : null; }
 r.get('/langganan', requireUser('sesi.lihat'), ah(async (req, res) => {
   const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
-  const invoices = can(req.user, 'studio.edit') ? await db.many('SELECT id, jenis, plan, bulan, kredit, jumlah, status, payment_url, dibayar_pada, dibuat_pada FROM invoices WHERE studio_id=$1 ORDER BY id DESC LIMIT 24', [studio.id]) : [];
-  res.json({ ...plans.summary(studio), pemakaian: await plans.usage(studio.id), invoices, payment: payment.enabled(),
+  const owner = can(req.user, 'studio.edit');
+  res.json({ ...plans.summary(studio), pemakaian: await plans.usage(studio.id),
     katalog: Object.entries(plans.PLANS).map(([k, p]) => ({ kode: k, nama: p.nama, harga: p.harga, sesi: p.sesi === Infinity ? null : p.sesi, pengguna: p.pengguna === Infinity ? null : p.pengguna, fitur: p.fitur.map((f) => plans.FITUR_NAMA[f]) })),
-    kredit: { sesi: config.kreditPaket, harga: config.kreditHarga } });
+    nominal: saldo.nominalList(),
+    qris: { ada: !!(await platformSetting('qris_path')), nama_penerima: await platformSetting('qris_nama') },
+    mutasi: owner ? await db.many('SELECT id, jenis, jumlah, saldo_akhir, keterangan, aktor, waktu FROM saldo_mutasi WHERE studio_id=$1 ORDER BY id DESC LIMIT 50', [studio.id]) : [],
+    topups: owner ? await db.many(`SELECT id, nominal, kode_unik, jumlah_transfer, status, catatan, (bukti_path IS NOT NULL) AS ada_bukti, kedaluwarsa, dibuat_pada, diproses_pada
+      FROM topups WHERE studio_id=$1 ORDER BY id DESC LIMIT 20`, [studio.id]) : [] });
 }));
-r.post('/langganan/beli', requireUser('studio.edit'), ah(async (req, res) => {
-  if (!config.billingEnabled) throw bad('Langganan tidak aktif di server ini (BILLING_ENABLED=false): semua fitur sudah terbuka.');
-  if (!payment.enabled()) throw bad('Payment gateway belum dikonfigurasi.');
-  const studio = await db.one('SELECT * FROM studios WHERE id=$1', [req.user.studio_id]);
-  let inv;
-  if (req.body.kredit) {
-    inv = { jenis: 'kredit', kredit: config.kreditPaket, jumlah: config.kreditHarga, nama: `Kredit ${config.kreditPaket} sesi` };
-  } else {
-    const p = plans.PLANS[req.body.plan];
-    if (!p || !p.harga) throw bad('Paket tidak bisa dibeli online. Hubungi kami untuk paket Bisnis.');
-    const bulan = int(req.body.bulan, { min: 1, max: 12, def: 1, name: 'Bulan' });
-    const jumlah = bulan >= 12 ? p.harga * 10 : p.harga * bulan; // tahunan: hemat 2 bulan
-    inv = { jenis: 'plan', plan: req.body.plan, bulan, jumlah, nama: `Paket ${p.nama} ${bulan} bulan` };
-  }
-  const row = await db.one(`INSERT INTO invoices(studio_id, jenis, plan, bulan, kredit, jumlah, order_id) VALUES ($1,$2,$3,$4,$5,$6, 'tmp-' || gen_random_uuid()) RETURNING id`,
-    [studio.id, inv.jenis, inv.plan || null, inv.bulan || null, inv.kredit || null, inv.jumlah]);
-  const orderId = `GS-I-${row.id}-${Date.now()}`;
-  let snap;
-  try {
-    snap = await payment.createSnap({ orderId, amount: inv.jumlah, items: [{ id: `inv-${row.id}`, name: inv.nama.slice(0, 50), price: inv.jumlah, quantity: 1 }],
-      customer: { first_name: req.user.nama, email: req.user.email }, finishUrl: `${config.baseUrl}/app#/langganan` });
-  } catch (e) { await db.q("UPDATE invoices SET status='batal' WHERE id=$1", [row.id]); throw bad(e.message); }
-  await db.q('UPDATE invoices SET order_id=$2, payment_url=$3 WHERE id=$1', [row.id, orderId, snap.url]);
-  res.json({ ok: true, url: snap.url });
+r.post('/langganan/topup', requireUser('studio.edit'), limit('topup', 10, 3600), ah(async (req, res) => {
+  if (!config.billingEnabled) throw bad('Langganan tidak aktif di server ini (BILLING_ENABLED=false).');
+  if (!(await platformSetting('qris_path'))) throw bad('QRIS belum disiapkan admin platform.');
+  const t = await saldo.createTopup(req.user.studio_id, req.user.id, req.body.nominal);
+  res.json({ id: t.id, nominal: Number(t.nominal), kode_unik: t.kode_unik, jumlah_transfer: Number(t.jumlah_transfer), kedaluwarsa: t.kedaluwarsa });
+}));
+r.post('/langganan/topup/:id/batal', requireUser('studio.edit'), ah(async (req, res) => {
+  await saldo.cancelTopup(req.user.studio_id, parseInt(req.params.id, 10) || 0);
+  res.json({ ok: true });
+}));
+async function saveImage(dataUrl, dir, name) {
+  const m = String(dataUrl || '').match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) throw bad('Gambar harus PNG, JPG, atau WEBP.');
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 3 * 1024 * 1024) throw bad('Gambar maksimal 3 MB.');
+  // Encode ulang: membuang metadata & payload tersembunyi, menolak file yang bukan gambar
+  const out = await require('sharp')(buf, { limitInputPixels: 40e6 }).rotate().resize(1600, 1600, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer()
+    .catch(() => { throw bad('Gambar tidak bisa dibaca.'); });
+  const full = path.join(config.dataDir, dir);
+  await fs.promises.mkdir(full, { recursive: true });
+  await fs.promises.writeFile(path.join(full, name), out);
+  return `${dir}/${name}`;
+}
+r.post('/langganan/topup/:id/bukti', requireUser('studio.edit'), limit('bukti', 20, 3600), ah(async (req, res) => {
+  const t = await db.one("SELECT id FROM topups WHERE id=$1 AND studio_id=$2 AND status='menunggu'", [parseInt(req.params.id, 10) || 0, req.user.studio_id]);
+  if (!t) throw bad('Top up tidak ditemukan atau sudah diproses.');
+  const rel = await saveImage(req.body.data_url, 'bukti', `${t.id}-${randomToken(8)}.jpg`);
+  await db.q('UPDATE topups SET bukti_path=$2 WHERE id=$1', [t.id, rel]);
+  res.json({ ok: true });
+}));
+r.get('/langganan/topup/:id/bukti', ah(async (req, res) => {
+  const id = parseInt(req.params.id, 10) || 0;
+  const t = req.user.superadmin
+    ? await db.one('SELECT bukti_path FROM topups WHERE id=$1', [id])
+    : await db.one('SELECT bukti_path FROM topups WHERE id=$1 AND studio_id=$2', [id, req.user.studio_id]);
+  if (!t || !t.bukti_path || !(req.user.superadmin || can(req.user, 'studio.edit'))) throw notFound();
+  res.set('Cache-Control', 'private, no-store');
+  res.sendFile(path.join(config.dataDir, 'bukti', path.basename(t.bukti_path)));
+}));
+r.get('/qris', ah(async (req, res) => {
+  const rel = await platformSetting('qris_path');
+  if (!rel) throw notFound();
+  res.set('Cache-Control', 'private, max-age=300');
+  res.sendFile(path.join(config.dataDir, 'platform', path.basename(rel)));
+}));
+r.post('/langganan/bayar', requireUser('studio.edit'), limit('bayar_paket', 20, 3600), ah(async (req, res) => {
+  if (!config.billingEnabled) throw bad('Langganan tidak aktif di server ini (BILLING_ENABLED=false).');
+  const bulan = int(req.body.bulan, { min: 1, max: 12, def: 1, name: 'Bulan' });
+  const out = await saldo.bayarPaket(req.user.studio_id, String(req.body.plan || ''), bulan, req.user.email);
+  res.json({ ok: true, ...out });
+}));
+r.put('/langganan/otomatis', requireUser('studio.edit'), ah(async (req, res) => {
+  await db.q('UPDATE studios SET perpanjang_otomatis=$2 WHERE id=$1', [req.user.studio_id, bool(req.body.aktif)]);
+  res.json({ ok: true });
 }));
 
 // ---------- Super admin platform ----------
@@ -1049,23 +1085,59 @@ async function audit(req, aksi, studioId, detail) {
 }
 r.get('/admin/studios', requireSuperadmin(), ah(async (req, res) => {
   const q = req.query.q ? `%${String(req.query.q).slice(0, 80)}%` : null;
-  res.json(await db.many(`SELECT st.id, st.nama, st.slug, st.plan, st.plan_sampai, st.kredit_sesi, st.aktif, st.dibuat_pada, st.no_wa,
+  res.json(await db.many(`SELECT st.id, st.nama, st.slug, st.plan, st.plan_sampai, st.saldo, st.aktif, st.dibuat_pada, st.no_wa,
       (SELECT email FROM users WHERE studio_id=st.id AND peran='owner' ORDER BY id LIMIT 1) AS owner_email,
       (SELECT count(*)::int FROM users WHERE studio_id=st.id AND aktif) AS pengguna,
       (SELECT count(*)::int FROM sesis WHERE studio_id=st.id) AS sesi_total,
-      (SELECT count(*)::int FROM sesis WHERE studio_id=st.id AND dibuat_pada >= date_trunc('month', now())) AS sesi_bulan_ini,
-      (SELECT max(dibuat_pada) FROM sesis WHERE studio_id=st.id) AS sesi_terakhir
+      (SELECT count(*)::int FROM sesis WHERE studio_id=st.id AND dibuat_pada >= date_trunc('month', now())) AS sesi_bulan_ini
     FROM studios st WHERE ($1::text IS NULL OR st.nama ILIKE $1 OR st.slug ILIKE $1) ORDER BY st.id DESC LIMIT 500`, [q]));
 }));
 r.put('/admin/studios/:id', requireSuperadmin(), ah(async (req, res) => {
-  const st = await db.one('SELECT * FROM studios WHERE id=$1', [req.params.id]);
+  const st = await db.one('SELECT * FROM studios WHERE id=$1', [parseInt(req.params.id, 10) || 0]);
   if (!st) throw notFound();
   const plan = plans.PLANS[req.body.plan] ? req.body.plan : st.plan;
   const sampai = req.body.plan_sampai === '' ? null : (/^\d{4}-\d{2}-\d{2}$/.test(req.body.plan_sampai || '') ? req.body.plan_sampai + 'T23:59:59+07:00' : st.plan_sampai);
-  const tambahKredit = int(req.body.tambah_kredit, { min: -100000, max: 100000, def: 0, name: 'Kredit' });
   const aktif = req.body.aktif === undefined ? st.aktif : bool(req.body.aktif);
-  await db.q('UPDATE studios SET plan=$2, plan_sampai=$3, kredit_sesi=GREATEST(0, kredit_sesi+$4), aktif=$5 WHERE id=$1', [st.id, plan, sampai, tambahKredit, aktif]);
-  await audit(req, 'ubah_studio', st.id, { plan, plan_sampai: sampai, tambah_kredit: tambahKredit, aktif });
+  await db.q('UPDATE studios SET plan=$2, plan_sampai=$3, aktif=$4 WHERE id=$1', [st.id, plan, sampai, aktif]);
+  if (!aktif) await db.q('DELETE FROM user_sessions WHERE user_id IN (SELECT id FROM users WHERE studio_id=$1)', [st.id]);
+  await audit(req, 'ubah_studio', st.id, { plan, plan_sampai: sampai, aktif });
+  res.json({ ok: true });
+}));
+r.post('/admin/studios/:id/koreksi', requireSuperadmin(), ah(async (req, res) => {
+  const id = parseInt(req.params.id, 10) || 0;
+  const jumlah = int(req.body.jumlah, { min: -1e10, max: 1e10, name: 'Jumlah' });
+  const ket = str(req.body.keterangan, { required: true, max: 200, name: 'Keterangan' });
+  const s2 = await saldo.koreksi(id, jumlah, ket, req.user.email);
+  await audit(req, 'koreksi_saldo', id, { jumlah, keterangan: ket, saldo_akhir: s2 });
+  res.json({ ok: true, saldo: s2 });
+}));
+r.get('/admin/topups', requireSuperadmin(), ah(async (req, res) => {
+  const st = ['menunggu', 'disetujui', 'ditolak', 'batal'].includes(req.query.status) ? req.query.status : 'menunggu';
+  res.json(await db.many(`SELECT t.id, t.studio_id, st.nama AS studio_nama, t.nominal, t.kode_unik, t.jumlah_transfer, t.status, t.catatan,
+      (t.bukti_path IS NOT NULL) AS ada_bukti, t.dibuat_pada, t.kedaluwarsa, t.diproses_oleh, t.diproses_pada
+    FROM topups t JOIN studios st ON st.id=t.studio_id WHERE t.status=$1 ORDER BY t.id DESC LIMIT 200`, [st]));
+}));
+r.post('/admin/topups/:id/setujui', requireSuperadmin(), ah(async (req, res) => {
+  const id = parseInt(req.params.id, 10) || 0;
+  const out = await saldo.approveTopup(id, req.user.email);
+  await audit(req, 'setujui_topup', out.studio_id, { topup_id: id, jumlah: out.jumlah, saldo_akhir: out.saldo });
+  res.json({ ok: true, ...out });
+}));
+r.post('/admin/topups/:id/tolak', requireSuperadmin(), ah(async (req, res) => {
+  const id = parseInt(req.params.id, 10) || 0;
+  await saldo.rejectTopup(id, req.user.email, str(req.body.catatan, { max: 200 }));
+  await audit(req, 'tolak_topup', null, { topup_id: id, catatan: req.body.catatan || null });
+  res.json({ ok: true });
+}));
+r.put('/admin/qris', requireSuperadmin(), ah(async (req, res) => {
+  if (req.body.data_url) {
+    const rel = await saveImage(req.body.data_url, 'platform', `qris-${randomToken(8)}.jpg`);
+    await db.q(`INSERT INTO platform_settings(kunci, nilai) VALUES ('qris_path',$1) ON CONFLICT (kunci) DO UPDATE SET nilai=$1, waktu=now()`, [rel]);
+  }
+  if (req.body.nama_penerima !== undefined) {
+    await db.q(`INSERT INTO platform_settings(kunci, nilai) VALUES ('qris_nama',$1) ON CONFLICT (kunci) DO UPDATE SET nilai=$1, waktu=now()`, [str(req.body.nama_penerima, { max: 100 })]);
+  }
+  await audit(req, 'ubah_qris', null, { gambar: !!req.body.data_url });
   res.json({ ok: true });
 }));
 r.get('/admin/audit', requireSuperadmin(), ah(async (req, res) => {
@@ -1075,7 +1147,9 @@ r.get('/admin/ringkasan', requireSuperadmin(), ah(async (req, res) => {
   res.json(await db.one(`SELECT (SELECT count(*)::int FROM studios) AS studio, (SELECT count(*)::int FROM studios WHERE aktif) AS studio_aktif,
     (SELECT count(*)::int FROM sesis WHERE dibuat_pada > now() - interval '30 days') AS sesi_30h,
     (SELECT count(DISTINCT studio_id)::int FROM sesis WHERE dibuat_pada > now() - interval '14 days') AS studio_aktif_14h,
-    (SELECT COALESCE(sum(jumlah),0)::bigint FROM invoices WHERE status='lunas' AND dibayar_pada > now() - interval '30 days') AS pendapatan_30h`));
+    (SELECT count(*)::int FROM topups WHERE status='menunggu' AND kedaluwarsa > now()) AS topup_menunggu,
+    (SELECT COALESCE(sum(jumlah_transfer),0)::bigint FROM topups WHERE status='disetujui' AND diproses_pada > now() - interval '30 days') AS topup_30h,
+    (SELECT COALESCE(-sum(jumlah),0)::bigint FROM saldo_mutasi WHERE jenis='bayar_paket' AND waktu > now() - interval '30 days') AS pendapatan_30h`));
 }));
 
 r.use((req, res, next) => next(new HttpError(404, 'Endpoint tidak ditemukan.')));

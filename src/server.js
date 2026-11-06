@@ -12,6 +12,7 @@ async function main() {
   await sesi.heartbeat();
   sesi.startBackground();
   retensi.start();
+  require('./saldo').start();
   await sync.resumePending();
   const app = createApp();
   const server = app.listen(config.port, () => {
