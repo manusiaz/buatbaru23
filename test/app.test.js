@@ -1009,7 +1009,7 @@ test('perpanjang masa coba: bayar Rp 5.000 dari saldo = +3 hari, bisa bertumpuk;
     assert.equal(r2.saldo, 2000);
     assert.equal((await a.call('POST', '/api/langganan/perpanjang-coba')).status, 402, 'saldo Rp 2.000 tidak cukup');
     const m = (await a.call('GET', '/api/langganan')).body.mutasi;
-    assert.equal(m.filter((x) => /Perpanjang coba gratis/.test(x.keterangan)).length, 2);
+    assert.equal(m.filter((x) => /Traktir kopi/.test(x.keterangan)).length, 2);
     // Paralel tidak bisa memakai saldo yang sama dua kali
     await db.q('UPDATE studios SET saldo=5000 WHERE id=$1', [id]);
     const par = await Promise.all([a.call('POST', '/api/langganan/perpanjang-coba'), a.call('POST', '/api/langganan/perpanjang-coba')]);

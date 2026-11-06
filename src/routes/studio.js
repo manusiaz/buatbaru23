@@ -1200,7 +1200,7 @@ r.post('/langganan/bayar', requireUser('studio.edit'), limit('bayar_paket', 20, 
 r.post('/langganan/perpanjang-coba', requireUser('studio.edit'), limit('perpanjang_coba', 20, 3600), ah(async (req, res) => {
   if (!config.billingEnabled) throw bad('Langganan tidak aktif di server ini (BILLING_ENABLED=false).');
   const out = await saldo.perpanjangCoba(req.user.studio_id, req.user.email);
-  await auditStudio(req, req.user.studio_id, 'perpanjang_coba', { harga: out.harga, hari: out.hari });
+  await auditStudio(req, req.user.studio_id, 'perpanjang_coba', { harga: out.harga, hari: out.hari, jenis: 'traktir_kopi' });
   res.json({ ok: true, ...out });
 }));
 r.put('/langganan/otomatis', requireUser('studio.edit'), ah(async (req, res) => {
