@@ -175,8 +175,8 @@ r.get('/state', ah(async (req, res) => {
       subfolder: showName ? f.path_subfolder : null,
       nama_kembar: showName ? f.nama_kembar : false,
       dipilih: f.dipilih, catatan: f.catatan, is_tambahan: f.is_tambahan,
-      thumb: media.url(s.id, f.id, 'thumb'),
-      preview: media.url(s.id, f.id, 'preview'),
+      thumb: media.url(s.id, f.id, 'thumb', s.media_versi),
+      preview: media.url(s.id, f.id, 'preview', s.media_versi),
     })),
   });
 }));

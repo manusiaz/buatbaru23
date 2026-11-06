@@ -44,7 +44,9 @@ function createApp() {
     }
     next();
   });
-  app.use(express.json({ limit: '4mb' }));
+  // Batas body: 5 MB hanya untuk unggahan gambar & CSV massal, selain itu 256 KB
+  const bigBody = /^\/api\/(studio\/logo|langganan\/topup\/\d+\/bukti|admin\/qris|sesis\/massal)$/;
+  app.use((req, res, next) => express.json({ limit: bigBody.test(req.path) ? '5mb' : '256kb' })(req, res, next));
 
   app.use('/api/webhooks', require('./routes/webhooks'));
   app.use('/api', require('./routes/studio'));
@@ -74,6 +76,10 @@ function createApp() {
     res.sendFile(path.join(pub, 'galeri.html'));
   });
   app.get('/privasi', page('privasi.html'));
+  app.get(['/.well-known/security.txt', '/security.txt'], (req, res) => {
+    const exp = new Date(Date.now() + 180 * 86400000).toISOString();
+    res.type('text/plain').send(`Contact: ${config.securityContact || 'mailto:security@' + new URL(config.baseUrl).hostname}\nExpires: ${exp}\nPreferred-Languages: id, en\nCanonical: ${config.baseUrl}/.well-known/security.txt\n`);
+  });
   app.use(express.static(pub, { index: false, maxAge: config.isProd ? '1h' : 0 }));
 
   // Error handler

@@ -462,7 +462,8 @@
           h('div.linkbox', h('code', s.link), h('button.btn.btn-amber', { type: 'button', onclick: function () { UI.copy(s.link, 'Link tersalin'); } }, ic('salin'), 'Salin link')),
           h('div.row', { style: { justifyContent: 'space-between' } },
             h('div', h('div.small', { style: { color: '#C9E3E6' } }, 'PIN'), h('span.pin', s.pin), ' ',
-              h('button.btn.btn-sm.btn-ghost-dark', { type: 'button', onclick: gantiPin }, 'Ganti PIN')),
+              h('button.btn.btn-sm.btn-ghost-dark', { type: 'button', onclick: gantiPin }, 'Ganti PIN'), ' ',
+              h('button.btn.btn-sm.btn-ghost-dark', { type: 'button', onclick: gantiLink }, 'Ganti link')),
             h('div.row',
               h('button.btn.btn-ghost-dark', { type: 'button', onclick: function () { UI.copy(s.wa_text, 'Pesan tersalin'); } }, ic('salin'), 'Salin pesan'),
               h('a.btn.btn-amber', { href: s.wa_url, target: '_blank', rel: 'noopener', onclick: function () { api('POST', '/api/sesis/' + id + '/aksi', { aksi: 'link_dikirim' }).catch(function () {}); } }, ic('wa'), 'Kirim via WhatsApp'),
@@ -550,6 +551,11 @@
       }
       function resetTimer() {
         UI.confirm('Reset timer?', 'Timer kembali ke awal dan pelanggan menekan "Mulai pilih" lagi. Pilihan yang sudah ada tetap tersimpan.', 'Reset').then(function (ok) { if (ok) act('/aksi', { aksi: 'reset_timer' }, 'Timer di-reset'); });
+      }
+      function gantiLink() {
+        UI.confirm('Ganti link galeri?', 'Link lama langsung tidak berlaku, pelanggan yang sedang membuka galeri harus memakai link baru, dan link pratinjau foto lama ikut mati. Pakai ini bila link bocor ke orang lain.', 'Ganti link', 'btn-danger').then(function (ok) {
+          if (ok) api('POST', '/api/sesis/' + id + '/ganti-link').then(function () { UI.toast('Link baru dibuat. Kirim ulang ke pelanggan.'); load(); }).catch(err);
+        });
       }
       function gantiPin() {
         UI.confirm('Ganti PIN?', 'PIN lama tidak berlaku dan pelanggan yang sedang membuka galeri harus memasukkan PIN baru.', 'Ganti PIN').then(function (ok) {
@@ -840,7 +846,7 @@
           var pr = h('select.select', { 'aria-label': 'Peran', style: { width: 'auto' } }, h('option', { value: 'admin' }, 'Admin / kasir'), h('option', { value: 'editor' }, 'Editor'));
           box.appendChild(h('section.card', h('h2.title', 'Undang anggota'), h('div.row', { style: { flexWrap: 'nowrap' } }, em, pr, h('button.btn.btn-primary', { type: 'button', onclick: function () {
             api('POST', '/api/tim/undang', { email: em.value, peran: pr.value }).then(function (r) {
-              UI.modal({ title: 'Link undangan', body: h('div.stack', { style: { gap: '10px' } }, h('p.muted', 'Kirim link ini ke ' + em.value + '. Berlaku 7 hari.'), h('div.codebox', r.link)),
+              UI.modal({ title: 'Link undangan', body: h('div.stack', { style: { gap: '10px' } }, h('p.muted', 'Kirim link ini ke ' + em.value + '. Berlaku 7 hari' + (CFG.passwordLogin ? '.' : ', dan hanya bisa dipakai dengan akun Google ' + em.value + '.')), h('div.codebox', r.link)),
                 actions: [{ label: 'Tutup' }, { label: 'Salin link', cls: 'btn-amber', onClick: function (c) { UI.copy(r.link, 'Link undangan tersalin'); c(); } }] });
               load();
             }).catch(err);
@@ -899,6 +905,7 @@
         h('p.small.muted', 'Variabel: {nama} {judul} {studio} {link} {pin} {kuota} {durasi} {tambahan} {tenggat} {zona}'), f.template_wa),
       waSection(f),
       cabangSection(),
+      auditSection(),
       h('div.row', { style: { justifyContent: 'flex-end' } }, h('button.btn.btn-primary', { type: 'button', onclick: function () {
         var b = {}; Object.keys(f).forEach(function (k) { b[k] = f[k].type === 'checkbox' ? f[k].checked : f[k].value; });
         if (!b.wa_token) delete b.wa_token;
@@ -915,7 +922,8 @@
     main.appendChild(h('div.two-col',
       h('section.card', h('h2.title', 'Data diri'), h('div.stack', { style: { gap: '14px' } },
         h('label.field', h('span', 'Nama lengkap'), nama), h('label.field', h('span', 'Email'), h('input.input', { value: ME.user.email, disabled: true })),
-        h('label.field', h('span', 'Kata sandi lama'), pl), h('label.field', h('span', 'Kata sandi baru'), pb, h('span.hint', 'Minimal 8 karakter. Kosongkan jika tidak diganti.')),
+        CFG.passwordLogin ? [h('label.field', h('span', 'Kata sandi lama'), pl), h('label.field', h('span', 'Kata sandi baru'), pb, h('span.hint', 'Minimal 8 karakter. Kosongkan jika tidak diganti.'))]
+          : h('p.small.muted', ME.user.google_terhubung ? 'Masuk dengan Google. Keamanan akun (verifikasi 2 langkah, pemulihan) diatur di akun Google-mu.' : ''),
         h('div', h('button.btn.btn-primary', { type: 'button', onclick: function () {
           api('PUT', '/api/me', { nama: nama.value, password_lama: pl.value || undefined, password_baru: pb.value || undefined }).then(function () { UI.toast('Profil disimpan'); pl.value = pb.value = ''; refreshMe(); }).catch(err);
         } }, 'Simpan profil')))),
@@ -1237,6 +1245,24 @@
     } }, ic('tambah'), 'Tambah cabang')));
     load();
     return sec;
+  }
+  var AUDIT = { login: 'Masuk', login_gagal: 'Gagal masuk', logout: 'Keluar', daftar_studio: 'Studio didaftarkan', gabung_tim: 'Bergabung ke tim', undang_tim: 'Undang anggota',
+    batal_undangan: 'Batalkan undangan', ubah_anggota: 'Ubah anggota', ubah_logo: 'Ganti logo', ubah_token_wa: 'Ganti token WhatsApp', ubah_pengaturan: 'Ubah pengaturan',
+    hapus_galeri: 'Hapus galeri', ganti_pin: 'Ganti PIN galeri', ganti_link: 'Ganti link galeri', ekspor: 'Ekspor nama file', keluarkan_perangkat: 'Keluarkan perangkat' };
+  function auditSection() {
+    var list = h('ul.log', h('li.muted', 'Memuat…'));
+    api('GET', '/api/audit-keamanan').then(function (rows) {
+      list.innerHTML = '';
+      if (!rows.length) list.appendChild(h('li.muted', 'Belum ada catatan.'));
+      rows.forEach(function (a) {
+        var d = a.detail || {};
+        var info = [d.email, d.judul, d.metode, d.peran, d.format].filter(Boolean).join(' · ');
+        list.appendChild(h('li', h('time', UI.fmtDate(a.waktu, tz(), { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })),
+          h('div', h('b', { style: { color: a.aksi === 'login_gagal' ? 'var(--scarlet)' : 'inherit' } }, AUDIT[a.aksi] || a.aksi), ' · ', a.aktor, info ? h('div.small.muted', info) : null,
+            h('div.small.muted.mono', [a.ip, shortUA(a.user_agent)].filter(Boolean).join(' · ')))));
+      });
+    }).catch(function () { list.innerHTML = ''; });
+    return h('section.card', h('h2.title', 'Log keamanan'), h('p.small.muted', { style: { marginTop: '-8px' } }, 'Siapa masuk, dari mana, dan siapa mengubah tim, pengaturan, PIN, link, atau menghapus galeri.'), list);
   }
   function waSection(f) {
     var st = ME.studio;

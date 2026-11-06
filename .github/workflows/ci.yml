@@ -22,6 +22,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Cek kerentanan dependensi
+        run: npm audit --omit=dev --audit-level=high
       - run: npm test
         env:
           TEST_DATABASE_URL: postgres://app:app@localhost:5432/pilihfoto_test

@@ -39,7 +39,7 @@ Semua langkah di Google Cloud Console, dalam satu project:
 1. Aktifkan **Google Drive API**, dan **Google Picker API** bila memakai tombol "Pilih dari Google Drive".
 2. **Service account** (jalur utama, folder tetap privat): buat service account, buat key JSON, lalu isi `GOOGLE_SERVICE_ACCOUNT_JSON` (isi JSON-nya, boleh di-base64) atau `GOOGLE_SERVICE_ACCOUNT_FILE`. Email service account akan tampil di dasbor. Studio membagikan folder sesi ke email itu sebagai **Pelihat**.
 3. **API key** → `GOOGLE_API_KEY`. Dipakai untuk folder "link publik" dan Google Picker. Batasi key ke Drive API dan Picker API, plus HTTP referrer domainmu.
-4. **OAuth Client ID (Web application)** → `GOOGLE_CLIENT_ID`, dengan *Authorized JavaScript origins* = `BASE_URL`. Ini mengaktifkan "Masuk dengan Google" dan "Pilih dari Google Drive" (scope `drive.file`). Isi juga `GOOGLE_APP_ID` dengan *Project number*. Layar izin OAuth perlu diverifikasi Google sebelum dipakai publik (PRD: ajukan sejak minggu 2).
+4. **OAuth Client ID (Web application)** → `GOOGLE_CLIENT_ID`, dengan *Authorized JavaScript origins* = `BASE_URL`. **Wajib untuk produksi**: ini satu-satunya cara login studio. Juga mengaktifkan "Pilih dari Google Drive" (scope `drive.file`). Isi juga `GOOGLE_APP_ID` dengan *Project number*. Layar izin OAuth perlu diverifikasi Google sebelum dipakai publik (PRD: ajukan sejak minggu 2).
 
 Tanpa variabel di atas, aplikasi tetap jalan dengan sumber **Foto contoh**. Pilihan Drive yang konfigurasinya belum diisi akan tampil nonaktif.
 
@@ -120,7 +120,15 @@ Audit keamanan independen dijalankan (exploit dicoba langsung). Semua temuan sud
 
 Yang dinyatakan bersih oleh audit: SQL injection, XSS, IDOR antar studio lewat API, CSRF, path traversal, tanda tangan URL media, SSRF.
 
-Catatan sisa: email saat daftar belum diverifikasi (butuh SMTP). Akibatnya orang bisa "menduduki" email orang lain sebelum pemiliknya mendaftar, tapi tidak bisa mengambil alih akun yang sudah ada.
+### Login & akun
+
+- **Login studio hanya lewat Google** (bila `GOOGLE_CLIENT_ID` diisi). Aplikasi tidak menyimpan kata sandi; verifikasi email, verifikasi 2 langkah, dan pemulihan akun diurus Google. Token Google dicek: penerbit, `aud` = client ID-mu, email terverifikasi, belum kedaluwarsa.
+- **Undangan tim** hanya bisa diterima dengan akun Google yang emailnya sama dengan email yang diundang.
+- Login email+kata sandi hanya aktif bila `ALLOW_PASSWORD_LOGIN=true` atau `GOOGLE_CLIENT_ID` kosong (lokal/tes).
+- **Log keamanan studio** (Pengaturan › Log keamanan, khusus owner): masuk/gagal/keluar dengan IP & perangkat, undang/ubah anggota, ubah pengaturan/logo/token WA, ganti PIN/link, ekspor, hapus galeri.
+- **Ganti link galeri** (detail sesi): link lama, sesi pelanggan, dan URL pratinjau lama langsung mati. Ganti PIN juga mematikan URL pratinjau lama.
+- Batas ukuran request 256 KB (5 MB khusus unggahan gambar & CSV), `/.well-known/security.txt`, CSP, HSTS.
+- CI menjalankan `npm audit` dan Dependabot memantau dependensi.
 
 ## Pengembangan
 
@@ -130,7 +138,7 @@ cp .env.example .env    # isi DATABASE_URL lokal
 npm run dev             # http://localhost:3000 (NODE_ENV=development)
 ```
 
-Tes integrasi (31 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
+Tes integrasi (34 kasus) butuh PostgreSQL dengan database khusus tes. Tes **menghapus skema** database itu dan menolak jalan kalau nama database tidak mengandung "test".
 
 ```bash
 TEST_DATABASE_URL=postgres://app:app@localhost:5432/pilihfoto_test npm test

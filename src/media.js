@@ -12,10 +12,11 @@ function expiry() {
   const now = Math.floor(Date.now() / 1000);
   return Math.floor(now / WINDOW) * WINDOW + config.previewUrlTtlSec;
 }
-function sign(sesiId, fotoId, kind, exp) { return hmac(`m:${sesiId}:${fotoId}:${kind}:${exp}`).slice(0, 32); }
-function url(sesiId, fotoId, kind) {
+function sign(sesiId, fotoId, kind, exp, v) { return hmac(`m:${sesiId}:${fotoId}:${kind}:${exp}:${v}`).slice(0, 32); }
+// v = media_versi sesi: dinaikkan saat PIN/link diganti sehingga URL lama langsung tidak berlaku
+function url(sesiId, fotoId, kind, v = 1) {
   const exp = expiry();
-  return `/media/${sesiId}/${fotoId}/${kind}?e=${exp}&s=${sign(sesiId, fotoId, kind, exp)}`;
+  return `/media/${sesiId}/${fotoId}/${kind}?e=${exp}&v=${v}&s=${sign(sesiId, fotoId, kind, exp, v)}`;
 }
 
 const inflight = new Map();
@@ -27,7 +28,10 @@ async function handler(req, res) {
   if (!['thumb', 'preview'].includes(kind) || !exp || !req.query.s) return res.status(400).end();
   const now = Math.floor(Date.now() / 1000);
   if (exp < now || exp > now + 3600 + WINDOW) return res.status(410).send('Link pratinjau kedaluwarsa, muat ulang halaman.');
-  if (!safeEqual(sign(sesiId, fotoId, kind, exp), req.query.s)) return res.status(403).end();
+  const v = parseInt(req.query.v, 10) || 1;
+  if (!safeEqual(sign(sesiId, fotoId, kind, exp, v), req.query.s)) return res.status(403).end();
+  const cur = await db.one('SELECT media_versi FROM sesis WHERE id=$1', [sesiId]).catch(() => null);
+  if (!cur || cur.media_versi !== v) return res.status(410).send('Link pratinjau sudah tidak berlaku.');
   const p = images.filePath(sesiId, fotoId, kind);
   if (!fs.existsSync(p)) {
     const key = `${fotoId}:${kind}`;

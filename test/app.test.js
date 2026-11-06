@@ -572,3 +572,80 @@ test('audit #8: ekspor CSV menetralkan formula', async () => {
   const csv = F.csv([{ nomor: 1, nama_file: '=HYPERLINK("x")', catatan: '+1', path_subfolder: '@a' }], 1);
   assert.ok(!/,=|,\+|,@/.test(csv.split('\r\n')[1]));
 });
+
+// ======================= Login Google saja & fitur keamanan =======================
+test('login Google saja: kata sandi ditolak; undangan wajib email Google yang sama; token Google palsu ditolak', async () => {
+  const oldFetch = global.fetch;
+  const oldCfg = [config.passwordLogin, config.googleClientId];
+  // Tiru endpoint tokeninfo Google: credential "ok:<sub>:<email>" valid, "bad-aud:..." untuk aplikasi lain
+  global.fetch = async (url, opts) => {
+    const u = String(url);
+    if (!u.startsWith('https://oauth2.googleapis.com/tokeninfo')) return oldFetch(url, opts);
+    const cred = new URL(u).searchParams.get('id_token');
+    const [kind, sub, email] = cred.split(':');
+    const body = { iss: 'https://accounts.google.com', aud: kind === 'bad-aud' ? 'aplikasi-lain' : 'cid-test', sub, email, email_verified: 'true', name: 'User ' + sub, exp: String(Math.floor(Date.now() / 1000) + 600) };
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  config.passwordLogin = false; config.googleClientId = 'cid-test';
+  try {
+    const x = new Client();
+    assert.equal((await x.call('POST', '/api/auth/register', { studio_nama: 'S', nama: 'N', email: `p${Date.now()}@x.id`, password: 'rahasia123' })).status, 403);
+    assert.equal((await x.call('POST', '/api/auth/login', { email: 'a@b.c', password: 'rahasia123' })).status, 403);
+    const sub = 'g' + Date.now();
+    const ownerEmail = `${sub}@gmail.com`;
+    assert.equal((await x.call('POST', '/api/auth/google', { credential: `bad-aud:${sub}:${ownerEmail}` })).status, 400, 'token untuk aplikasi lain ditolak');
+    assert.equal((await x.call('POST', '/api/auth/google', { credential: `ok:${sub}:${ownerEmail}`, studio_nama: 'Studio Google' })).status, 200);
+    const me = (await x.call('GET', '/api/me')).body;
+    assert.equal(me.studio.nama, 'Studio Google');
+    assert.equal(me.user.peran, 'owner');
+    // Undangan
+    const inv = (await x.call('POST', '/api/tim/undang', { email: `tim${sub}@gmail.com`, peran: 'editor' })).body;
+    const token = inv.link.split('/undangan/')[1];
+    assert.equal((await new Client().call('POST', '/api/auth/invite/accept', { token, nama: 'A', password: 'rahasia123' })).status, 403);
+    const wrong = await new Client().call('POST', '/api/auth/google', { credential: `ok:${sub}x:penyusup@gmail.com`, invite: token });
+    assert.equal(wrong.status, 403, 'email Google lain ditolak untuk undangan ini');
+    const t = new Client();
+    assert.equal((await t.call('POST', '/api/auth/google', { credential: `ok:${sub}t:tim${sub}@gmail.com`, invite: token })).status, 200);
+    const tm = (await t.call('GET', '/api/me')).body;
+    assert.equal(tm.studio.id, me.studio.id);
+    assert.equal(tm.user.peran, 'editor');
+    // Log keamanan mencatat daftar, undang, gabung, login
+    const log = (await x.call('GET', '/api/audit-keamanan')).body.map((a) => a.aksi);
+    for (const a of ['daftar_studio', 'login', 'undang_tim', 'gabung_tim']) assert.ok(log.includes(a), a);
+    assert.equal((await t.call('GET', '/api/audit-keamanan')).status, 403, 'editor tidak bisa membaca log keamanan');
+  } finally {
+    global.fetch = oldFetch;
+    [config.passwordLogin, config.googleClientId] = oldCfg;
+  }
+});
+
+test('ganti link galeri: link lama, sesi pelanggan, dan URL pratinjau lama mati', async () => {
+  const c = await owner();
+  const s = await sesi(c, { durasi_pilih_menit: 0 });
+  const p = await pelanggan(s);
+  const st = (await p.call('GET', `/g/${s.token}/api/state`)).body;
+  assert.equal((await fetch(base + st.fotos[0].thumb)).status, 200);
+  const r = (await c.call('POST', `/api/sesis/${s.id}/ganti-link`)).body;
+  const newToken = r.link.split('/g/')[1];
+  assert.notEqual(newToken, s.token);
+  assert.equal((await p.call('GET', `/g/${s.token}/api/info`)).status, 404, 'link lama tidak berlaku');
+  assert.equal((await fetch(base + st.fotos[0].thumb)).status, 410, 'URL pratinjau lama mati');
+  const p2 = new Client();
+  assert.equal((await p2.call('POST', `/g/${newToken}/api/pin`, { pin: s.pin })).status, 200);
+  assert.equal((await p.call('GET', `/g/${newToken}/api/state`)).status, 401, 'cookie pelanggan lama tidak berlaku di link baru');
+  // Ganti PIN juga mematikan URL pratinjau lama
+  const st2 = (await p2.call('GET', `/g/${newToken}/api/state`)).body;
+  await c.call('POST', `/api/sesis/${s.id}/pin`, {});
+  assert.equal((await fetch(base + st2.fotos[0].thumb)).status, 410);
+});
+
+test('batas ukuran body & security.txt', async () => {
+  const big = 'x'.repeat(300 * 1024);
+  const r = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: big }) });
+  assert.equal(r.status, 413);
+  const sec = await fetch(base + '/.well-known/security.txt');
+  assert.equal(sec.status, 200);
+  assert.match(await sec.text(), /^Contact: /m);
+  const h = await fetch(base + '/');
+  assert.match(h.headers.get('content-security-policy') || '', /object-src 'none'/);
+});

@@ -26,6 +26,10 @@ const config = {
   // JANGAN "true": klien bisa memalsukan X-Forwarded-For dan melewati kunci PIN & rate limit.
   trustProxy: parseTrustProxy(env.TRUST_PROXY),
   allowRegistration: env.ALLOW_REGISTRATION !== 'false',
+  securityContact: env.SECURITY_CONTACT || '',
+  // Login studio default HANYA lewat Google (email terverifikasi, 2FA & pemulihan akun diurus Google, tidak ada kata sandi tersimpan).
+  // Login email+kata sandi hanya bila diizinkan eksplisit, atau bila Google belum dikonfigurasi (mis. lokal/tes).
+  passwordLogin: env.ALLOW_PASSWORD_LOGIN === 'true' || (!env.GOOGLE_CLIENT_ID && env.ALLOW_PASSWORD_LOGIN !== 'false'),
   previewUrlTtlSec: Math.min(int(env.PREVIEW_URL_TTL_SEC, 3600), 3600),
   allowDemoSource: env.ALLOW_DEMO_SOURCE !== 'false',
   isProd: env.NODE_ENV === 'production',
@@ -53,6 +57,10 @@ if (!config.appSecret) {
   config.appSecret = 'dev-secret-jangan-dipakai-di-production-0123456789';
 } else if (config.appSecret.length < 32) {
   throw new Error('APP_SECRET terlalu pendek (minimal 32 karakter). Buat dengan: openssl rand -base64 48');
+}
+
+if (config.isProd && !config.googleClientId) {
+  console.warn('[config] GOOGLE_CLIENT_ID kosong: login Google mati, login kata sandi dipakai sebagai cadangan. Isi GOOGLE_CLIENT_ID untuk produksi.');
 }
 
 function parseTrustProxy(v) {

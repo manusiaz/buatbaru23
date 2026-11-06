@@ -55,6 +55,7 @@ r.get('/config', (req, res) => {
     googleAppId: config.googleAppId || null,
     serviceAccountEmail: drive.serviceAccountEmail(),
     demoSource: config.allowDemoSource,
+    passwordLogin: config.passwordLogin,
     registrasi: config.allowRegistration,
     formats: F.FORMATS,
   });
@@ -62,6 +63,7 @@ r.get('/config', (req, res) => {
 
 // ---------- Auth ----------
 r.post('/auth/register', limit('auth', 10, 15 * 60), ah(async (req, res) => {
+  if (!config.passwordLogin) throw forbidden('Login dengan kata sandi dimatikan. Masuk dengan Google.');
   if (!config.allowRegistration) throw forbidden('Pendaftaran studio baru ditutup.');
   const studioNama = str(req.body.studio_nama, { required: true, max: 80, name: 'Nama studio' });
   const nama = str(req.body.nama, { required: true, max: 80, name: 'Nama' });
@@ -96,46 +98,91 @@ async function seedPakets(c, studioId) {
 }
 
 r.post('/auth/login', limit('auth', 20, 15 * 60), limit('login_email', 10, 15 * 60, (req) => String((req.body && req.body.email) || '').toLowerCase().slice(0, 160)), ah(async (req, res) => {
+  if (!config.passwordLogin) throw forbidden('Login dengan kata sandi dimatikan. Masuk dengan Google.');
   const email = str(req.body.email, { required: true, max: 160, name: 'Email' }).toLowerCase();
   const u = await db.one('SELECT id, password_hash, aktif FROM users WHERE email=$1', [email]);
   if (!u || !u.aktif || !(await checkPassword(String(req.body.password || ''), u.password_hash))) {
+    if (u) await auditStudio(req, (await db.one('SELECT studio_id FROM users WHERE id=$1', [u.id])).studio_id, 'login_gagal', null, { id: u.id, email });
     throw bad('Email atau kata sandi salah.');
   }
   await createLogin(req, res, u.id);
+  await auditStudio(req, (await db.one('SELECT studio_id FROM users WHERE id=$1', [u.id])).studio_id, 'login', { metode: 'sandi' }, { id: u.id, email });
   res.json({ ok: true });
 }));
 
 // Masuk/daftar dengan Google (ID token dari Google Identity Services)
-r.post('/auth/google', limit('auth', 20, 15 * 60), ah(async (req, res) => {
-  if (!config.googleClientId) throw bad('Login Google belum dikonfigurasi.');
-  const credential = str(req.body.credential, { required: true, max: 4096, name: 'Credential' });
+async function verifyGoogle(credential) {
   const resp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`);
   const info = await resp.json().catch(() => ({}));
-  if (!resp.ok || info.aud !== config.googleClientId || info.email_verified !== 'true') throw bad('Login Google gagal.');
-  const email = String(info.email).toLowerCase();
-  let u = await db.one('SELECT id, aktif FROM users WHERE google_sub=$1', [info.sub]);
+  const okIss = ['accounts.google.com', 'https://accounts.google.com'].includes(info.iss);
+  if (!resp.ok || !okIss || info.aud !== config.googleClientId || String(info.email_verified) !== 'true' || !info.sub || !info.email
+    || Number(info.exp) * 1000 < Date.now()) {
+    throw bad('Login Google gagal. Coba lagi.');
+  }
+  return { sub: String(info.sub), email: String(info.email).toLowerCase(), nama: info.name || String(info.email).split('@')[0] };
+}
+
+// Masuk / daftar studio / terima undangan dengan Google. Email dari Google sudah terverifikasi.
+r.post('/auth/google', limit('auth', 30, 15 * 60), ah(async (req, res) => {
+  if (!config.googleClientId) throw bad('Login Google belum dikonfigurasi.');
+  const g = await verifyGoogle(str(req.body.credential, { required: true, max: 4096, name: 'Credential' }));
+  const inviteToken = req.body.invite ? str(req.body.invite, { max: 100 }) : null;
+  let u = await db.one('SELECT id, aktif, studio_id FROM users WHERE google_sub=$1', [g.sub]);
   if (!u) {
-    const byEmail = await db.one('SELECT id, password_hash FROM users WHERE lower(email)=$1', [email]);
-    // Akun yang dibuat dengan kata sandi tidak otomatis ditautkan: email saat daftar tidak diverifikasi,
-    // jadi akun itu bisa saja dibuat orang lain lebih dulu.
-    if (byEmail) throw bad('Email ini sudah terdaftar dengan kata sandi. Masuk dengan email & kata sandi.');
+    const byEmail = await db.one('SELECT id, aktif, password_hash, google_sub FROM users WHERE lower(email)=$1', [g.email]);
+    if (byEmail && byEmail.google_sub) throw bad('Email ini sudah tertaut ke akun Google lain.');
+    if (byEmail && byEmail.password_hash && config.passwordLogin) {
+      // Selama login kata sandi aktif, email saat daftar tidak diverifikasi: jangan tautkan otomatis
+      throw bad('Email ini sudah terdaftar dengan kata sandi. Masuk dengan email & kata sandi.');
+    }
+    if (byEmail) {
+      // Mode Google saja: akun lama (dibuat sebelum mode ini / lewat CLI) ditautkan ke Google pemilik email yang sama
+      await db.q('UPDATE users SET google_sub=$2, password_hash=NULL WHERE id=$1', [byEmail.id, g.sub]);
+      u = byEmail;
+    }
   }
   if (u && !u.aktif) throw forbidden('Akun dinonaktifkan.');
+  if (!u && inviteToken) {
+    // Undangan tim: email Google HARUS sama dengan email yang diundang (bukti kepemilikan email)
+    u = await db.tx(async (c) => {
+      const inv = (await c.query('SELECT * FROM invites WHERE token_hash=$1 AND dipakai_pada IS NULL AND kedaluwarsa > now() FOR UPDATE', [sha256(inviteToken)])).rows[0];
+      if (!inv) throw notFound('Undangan tidak berlaku atau sudah dipakai.');
+      if (inv.email.toLowerCase() !== g.email) throw forbidden(`Undangan ini untuk ${inv.email}. Masuk dengan akun Google tersebut.`);
+      await c.query('UPDATE invites SET dipakai_pada=now() WHERE id=$1', [inv.id]);
+      return (await c.query('INSERT INTO users(studio_id, nama, email, google_sub, peran) VALUES ($1,$2,$3,$4,$5) RETURNING id, studio_id',
+        [inv.studio_id, g.nama, g.email, g.sub, inv.peran])).rows[0];
+    });
+    await auditStudio(req, u.studio_id, 'gabung_tim', { email: g.email }, { id: u.id, email: g.email });
+  }
   if (!u) {
     if (!config.allowRegistration) throw forbidden('Pendaftaran studio baru ditutup.');
-    const studioNama = str(req.body.studio_nama, { max: 80 }) || `Studio ${info.name || email.split('@')[0]}`;
+    const studioNama = str(req.body.studio_nama, { max: 80 }) || `Studio ${g.nama}`;
     u = await db.tx(async (c) => {
       const st = (await c.query('INSERT INTO studios(nama, slug) VALUES ($1,$2) RETURNING id', [studioNama, await uniqueSlug(studioNama)])).rows[0];
       await seedPakets(c, st.id);
-      return (await c.query("INSERT INTO users(studio_id, nama, email, google_sub, peran) VALUES ($1,$2,$3,$4,'owner') RETURNING id",
-        [st.id, info.name || email, email, info.sub])).rows[0];
+      return (await c.query("INSERT INTO users(studio_id, nama, email, google_sub, peran) VALUES ($1,$2,$3,$4,'owner') RETURNING id, studio_id",
+        [st.id, g.nama, g.email, g.sub])).rows[0];
     });
+    await auditStudio(req, u.studio_id, 'daftar_studio', null, { id: u.id, email: g.email });
   }
   await createLogin(req, res, u.id);
+  await auditStudio(req, u.studio_id || (await db.one('SELECT studio_id FROM users WHERE id=$1', [u.id])).studio_id, 'login', { metode: 'google' }, { id: u.id, email: g.email });
   res.json({ ok: true });
 }));
 
-r.post('/auth/logout', ah(async (req, res) => { await destroyLogin(req, res); res.json({ ok: true }); }));
+// Log keamanan studio
+async function auditStudio(req, studioId, aksi, detail, who) {
+  const u = who || req.user || {};
+  await db.q('INSERT INTO studio_audit(studio_id, user_id, aktor, aksi, detail, ip, user_agent) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+    [studioId, u.id || null, u.email || 'sistem', aksi, detail ? JSON.stringify(detail) : null, req.ip || null, String(req.headers['user-agent'] || '').slice(0, 200)]).catch((e) => console.error('[audit]', e.message));
+}
+
+r.post('/auth/logout', ah(async (req, res) => {
+  const u = await currentUser(req);
+  if (u) await auditStudio(req, u.studio_id, 'logout', null, u);
+  await destroyLogin(req, res);
+  res.json({ ok: true });
+}));
 
 r.get('/auth/invite/:token', ah(async (req, res) => {
   const inv = await db.one(`SELECT i.email, i.peran, s.nama AS studio_nama FROM invites i JOIN studios s ON s.id=i.studio_id
@@ -144,6 +191,7 @@ r.get('/auth/invite/:token', ah(async (req, res) => {
   res.json(inv);
 }));
 r.post('/auth/invite/accept', limit('auth', 20, 15 * 60), ah(async (req, res) => {
+  if (!config.passwordLogin) throw forbidden('Login dengan kata sandi dimatikan. Masuk dengan Google.');
   const token = str(req.body.token, { required: true, max: 100, name: 'Token' });
   const nama = str(req.body.nama, { required: true, max: 80, name: 'Nama' });
   const password = String(req.body.password || '');
@@ -213,6 +261,7 @@ r.get('/me/devices', ah(async (req, res) => {
 }));
 r.delete('/me/devices/:id', ah(async (req, res) => {
   await db.q("DELETE FROM user_sessions WHERE user_id=$1 AND left(token_hash,16)=$2 AND token_hash<>$3", [req.user.id, req.params.id, req.user.sid]);
+  await auditStudio(req, req.user.studio_id, 'keluarkan_perangkat', null);
   res.json({ ok: true });
 }));
 
@@ -232,6 +281,7 @@ r.put('/studio', requireUser('studio.edit'), ah(async (req, res) => {
     template_wa=$9, slug=COALESCE($10, slug) WHERE id=$1`, [req.user.studio_id, nama, warna, b.no_wa ? normWa(b.no_wa) : null, zona,
     str(b.watermark, { max: 60 }) || null, int(b.retensi_hari, { min: 1, max: 365, def: 30, name: 'Retensi' }), fmt,
     str(b.template_wa, { max: 1000 }) || null, slug]);
+  await auditStudio(req, req.user.studio_id, 'ubah_pengaturan', { nama, zona_waktu: zona, format_salin: fmt });
   if (b.wa_otomatis !== undefined || b.template_hasil !== undefined) {
     await db.q('UPDATE studios SET wa_otomatis=COALESCE($2, wa_otomatis), template_hasil=$3 WHERE id=$1',
       [req.user.studio_id, b.wa_otomatis === undefined ? null : bool(b.wa_otomatis), str(b.template_hasil, { max: 1000 }) || null]);
@@ -240,7 +290,10 @@ r.put('/studio', requireUser('studio.edit'), ah(async (req, res) => {
     const pid = str(b.wa_phone_number_id, { max: 40 });
     if (pid && !/^\d+$/.test(pid)) throw bad('Phone number ID WhatsApp harus angka.');
     await db.q('UPDATE studios SET wa_phone_number_id=$2 WHERE id=$1', [req.user.studio_id, pid || null]);
-    if (b.wa_token) await db.q('UPDATE studios SET wa_token_enc=$2 WHERE id=$1', [req.user.studio_id, encrypt(String(b.wa_token).trim())]);
+    if (b.wa_token) {
+      await db.q('UPDATE studios SET wa_token_enc=$2 WHERE id=$1', [req.user.studio_id, encrypt(String(b.wa_token).trim())]);
+      await auditStudio(req, req.user.studio_id, 'ubah_token_wa', null);
+    }
     if (!pid) await db.q('UPDATE studios SET wa_token_enc=NULL WHERE id=$1', [req.user.studio_id]);
   }
   res.json({ ok: true });
@@ -258,6 +311,7 @@ r.post('/studio/logo', requireUser('studio.edit'), ah(async (req, res) => {
   await fs.promises.writeFile(path.join(dir, name), out);
   const old = await db.one('SELECT logo_path FROM studios WHERE id=$1', [req.user.studio_id]);
   await db.q('UPDATE studios SET logo_path=$2 WHERE id=$1', [req.user.studio_id, name]);
+  await auditStudio(req, req.user.studio_id, 'ubah_logo', null);
   if (old && old.logo_path) fs.promises.rm(path.join(dir, path.basename(old.logo_path)), { force: true }).catch(() => {});
   res.json({ ok: true });
 }));
@@ -279,10 +333,12 @@ r.post('/tim/undang', requireUser('tim.kelola'), ah(async (req, res) => {
   const token = randomToken(24);
   await db.q(`INSERT INTO invites(studio_id, email, peran, token_hash, kedaluwarsa) VALUES ($1,$2,$3,$4, now()+interval '7 days')`,
     [req.user.studio_id, email, peran, sha256(token)]);
+  await auditStudio(req, req.user.studio_id, 'undang_tim', { email, peran });
   res.json({ ok: true, link: `${config.baseUrl}/undangan/${token}` });
 }));
 r.delete('/tim/undang/:id', requireUser('tim.kelola'), ah(async (req, res) => {
   await db.q('DELETE FROM invites WHERE id=$1 AND studio_id=$2', [req.params.id, req.user.studio_id]);
+  await auditStudio(req, req.user.studio_id, 'batal_undangan', { invite_id: req.params.id });
   res.json({ ok: true });
 }));
 r.put('/tim/:id', requireUser('tim.kelola'), ah(async (req, res) => {
@@ -298,6 +354,7 @@ r.put('/tim/:id', requireUser('tim.kelola'), ah(async (req, res) => {
   }
   await db.q('UPDATE users SET peran=$2, aktif=$3, cabang_id=$4 WHERE id=$1', [u.id, peran, aktif, cabangId]);
   if (!aktif) await db.q('DELETE FROM user_sessions WHERE user_id=$1', [u.id]);
+  await auditStudio(req, req.user.studio_id, 'ubah_anggota', { email: u.email, peran, aktif, cabang_id: cabangId });
   res.json({ ok: true });
 }));
 
@@ -474,7 +531,7 @@ r.get('/sesis', requireUser('sesi.lihat'), ah(async (req, res) => {
     const fresh = await db.many('SELECT id, status, dikirim_otomatis, dikirim_pada FROM sesis WHERE id = ANY($1)', [stale.map((s) => s.id)]);
     fresh.forEach((f) => Object.assign(rows.find((x) => x.id === f.id), f));
   }
-  res.json(rows.map((s) => ({ ...sesiRow(s), cover: s.cover_id ? media.url(s.id, s.cover_id, 'thumb') : null })));
+  res.json(rows.map((s) => ({ ...sesiRow(s), cover: s.cover_id ? media.url(s.id, s.cover_id, 'thumb', s.media_versi) : null })));
 }));
 
 function waText(studio, s, link, pin) {
@@ -584,7 +641,7 @@ r.get('/sesis/:id', requireUser('sesi.lihat'), ah(async (req, res) => {
   out.link = link; out.pin = pin;
   out.nomor_total = total;
   out.drive_folder_url = s.sumber === 'contoh' ? null : `https://drive.google.com/drive/folders/${s.drive_folder_id}${s.resource_key ? `?resourcekey=${s.resource_key}` : ''}`;
-  out.fotos = fotos.map((f) => ({ ...f, thumb: media.url(s.id, f.id, 'thumb'), preview: media.url(s.id, f.id, 'preview') }));
+  out.fotos = fotos.map((f) => ({ ...f, thumb: media.url(s.id, f.id, 'thumb', s.media_versi), preview: media.url(s.id, f.id, 'preview', s.media_versi) }));
   out.events = events;
   out.tagihan = tagihan;
   out.editors = editors;
@@ -627,12 +684,29 @@ r.post('/sesis/:id/pin', requireUser('sesi.kelola'), ah(async (req, res) => {
   const s = await loadSesi(req, req.params.id);
   const pin = req.body.pin ? String(req.body.pin) : randomPin(6);
   if (!/^\d{4,6}$/.test(pin)) throw bad('PIN harus 4–6 digit angka.');
-  await db.q('UPDATE sesis SET pin_hash=$2, pin_enc=$3 WHERE id=$1', [s.id, hashPin(pin), encrypt(pin)]);
+  await db.q('UPDATE sesis SET pin_hash=$2, pin_enc=$3, media_versi=media_versi+1 WHERE id=$1', [s.id, hashPin(pin), encrypt(pin)]);
+  await auditStudio(req, s.studio_id, 'ganti_pin', { sesi_id: s.id, judul: s.judul });
   await db.q('DELETE FROM pin_attempts WHERE sesi_id=$1', [s.id]);
   await db.q('DELETE FROM pin_galeri WHERE sesi_id=$1', [s.id]);
   await db.q('DELETE FROM client_sessions WHERE sesi_id=$1', [s.id]);
   await S.logEvent(null, s.id, 'ganti_pin', req.user.nama, null);
   res.json({ ok: true, pin });
+}));
+
+// Ganti link galeri: link lama, sesi pelanggan, dan URL pratinjau lama langsung tidak berlaku
+r.post('/sesis/:id/ganti-link', requireUser('sesi.kelola'), ah(async (req, res) => {
+  const s = await loadSesi(req, req.params.id);
+  const token = randomToken(16);
+  await db.q('UPDATE sesis SET token_hash=$2, token_enc=$3, media_versi=media_versi+1 WHERE id=$1', [s.id, sha256(token), encrypt(token)]);
+  await db.q('DELETE FROM client_sessions WHERE sesi_id=$1', [s.id]);
+  await S.logEvent(null, s.id, 'ganti_link', req.user.nama, null);
+  await auditStudio(req, s.studio_id, 'ganti_link', { sesi_id: s.id, judul: s.judul });
+  res.json({ ok: true, link: galleryUrl(token) });
+}));
+
+// Log keamanan studio (owner)
+r.get('/audit-keamanan', requireUser('studio.edit'), ah(async (req, res) => {
+  res.json(await db.many('SELECT id, aktor, aksi, detail, ip, user_agent, waktu FROM studio_audit WHERE studio_id=$1 ORDER BY id DESC LIMIT 300', [req.user.studio_id]));
 }));
 
 // Aksi admin pada timer & status (F-32, F-25, F-27)
@@ -716,6 +790,7 @@ r.put('/sesis/:id/editor', requireUser('editor.kerja'), ah(async (req, res) => {
 r.delete('/sesis/:id', requireUser('sesi.hapus'), ah(async (req, res) => {
   const s = await loadSesi(req, req.params.id);
   await db.q('DELETE FROM sesis WHERE id=$1', [s.id]);
+  await auditStudio(req, s.studio_id, 'hapus_galeri', { sesi_id: s.id, judul: s.judul });
   await images.removeSesi(s.id);
   // Hapus pelanggan bila tidak punya sesi lain (UU PDP: hapus data atas permintaan)
   await db.q('DELETE FROM pelanggans p WHERE p.id=$1 AND NOT EXISTS (SELECT 1 FROM sesis WHERE pelanggan_id=p.id)', [s.pelanggan_id]);
@@ -732,6 +807,7 @@ r.get('/sesis/:id/ekspor.:ext', requireUser('sesi.lihat'), ah(async (req, res) =
   const items = await selectedItems(s.id);
   const total = (await db.one('SELECT COALESCE(max(nomor),0)::int AS m FROM fotos WHERE sesi_id=$1', [s.id])).m;
   const base = `pilihan-${slugify(s.judul)}-${s.id}`;
+  await auditStudio(req, s.studio_id, 'ekspor', { sesi_id: s.id, format: req.params.ext });
   if (req.params.ext === 'csv') {
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="${base}.csv"`);
