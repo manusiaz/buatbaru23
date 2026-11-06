@@ -1,0 +1,63 @@
+name: Deploy
+
+# Jalan otomatis setelah CI (tes + build Docker) LULUS untuk push ke main, atau manual dari tab Actions.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# Satu deploy dalam satu waktu; deploy berikutnya menunggu (tidak membatalkan yang sedang jalan)
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - name: Cek konfigurasi
+        id: cek
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$VPS_HOST" ] || [ -z "$VPS_USER" ] || [ -z "$VPS_SSH_KEY" ] || [ -z "$VPS_KNOWN_HOSTS" ]; then
+            echo "::notice::Auto-deploy belum dikonfigurasi (secret VPS_HOST, VPS_USER, VPS_SSH_KEY, VPS_KNOWN_HOSTS). Dilewati."
+            echo "siap=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "siap=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy ke VPS lewat SSH
+        if: steps.cek.outputs.siap == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "SHA tidak valid"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          # Host VPS harus cocok dengan known_hosts dari secret (cegah server palsu / MITM)
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_deploy -p "${VPS_PORT:-22}" \
+            -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=30 -o ConnectTimeout=20 \
+            "$VPS_USER@$VPS_HOST" "deploy $SHA"
+
+      - name: Bersihkan kunci
+        if: always()
+        run: rm -f ~/.ssh/id_deploy

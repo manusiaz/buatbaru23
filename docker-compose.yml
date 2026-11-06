@@ -2,6 +2,8 @@
 services:
   app:
     build: .
+    # Nama image tetap: dipakai deploy.sh untuk rollback cepat ke versi sebelumnya (galeri-seleksi:prev)
+    image: galeri-seleksi:latest
     restart: unless-stopped
     env_file: .env
     # Hanya bisa diakses dari mesin ini (lewat reverse proxy Nginx/Caddy). Jangan buka port 3000 ke internet.

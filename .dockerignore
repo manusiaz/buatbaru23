@@ -4,3 +4,6 @@ data
 .git
 test
 *.log
+backups
+.deploy.lock
+.github

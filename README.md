@@ -186,6 +186,51 @@ Catatan: karena rahasia dienkripsi dengan `APP_SECRET`, mengganti `APP_SECRET` m
 - Batas ukuran request 256 KB (5 MB khusus unggahan gambar & CSV), `/.well-known/security.txt`, CSP, HSTS.
 - CI menjalankan `npm audit` dan Dependabot memantau dependensi.
 
+## Auto-deploy & backup otomatis
+
+### Alur
+Push ke `main` → **CI** (tes, `npm audit`, build Docker) harus lulus → workflow **Deploy** SSH ke VPS → `scripts/deploy.sh`:
+1. kunci (tidak ada dua deploy bersamaan),
+2. **backup database + file `/data`** (pra-deploy; deploy dibatalkan bila backup gagal),
+3. tandai image sekarang sebagai `galeri-seleksi:prev`, ambil commit baru, `docker compose build` & `up`,
+4. cek `/healthz` sampai ±2 menit,
+5. **gagal → rollback otomatis** ke commit & image sebelumnya (tanpa build ulang), lalu workflow merah.
+Riwayat tercatat di `backups/deploy.log`. Bisa juga dijalankan manual: tab Actions › Deploy › Run workflow, atau di VPS `bash scripts/deploy.sh`.
+
+### Setup sekali di VPS
+```bash
+# 1) user khusus deploy yang boleh menjalankan docker
+sudo adduser --disabled-password deploy && sudo usermod -aG docker deploy
+sudo -iu deploy
+git clone https://github.com/manusiaz/buatbaru23.git ~/galeri && cd ~/galeri
+cp .env.example .env   # isi DATABASE_URL, BASE_URL, APP_SECRET, GOOGLE_CLIENT_ID, TRUST_PROXY=1
+docker compose up -d --build
+bash scripts/install-cron.sh          # backup harian 03:17, simpan 14 hari
+# 2) kunci SSH khusus deploy (di laptop/VPS mana saja)
+ssh-keygen -t ed25519 -N '' -C github-deploy -f deploy_key
+```
+Tambahkan isi `deploy_key.pub` ke `/home/deploy/.ssh/authorized_keys` **dengan perintah terkunci**, supaya kunci ini hanya bisa men-deploy, bukan membuka shell:
+```
+command="/home/deploy/galeri/scripts/deploy-ssh.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... github-deploy
+```
+Repo privat? Tambahkan juga *deploy key* read-only di GitHub (Settings › Deploy keys) agar `git fetch` di VPS jalan.
+
+### Secret di GitHub (Settings › Secrets and variables › Actions)
+| Secret | Isi |
+| --- | --- |
+| `VPS_HOST` | IP/domain VPS |
+| `VPS_USER` | `deploy` |
+| `VPS_SSH_KEY` | isi file `deploy_key` (privat) |
+| `VPS_KNOWN_HOSTS` | hasil `ssh-keyscan -t ed25519 IP_VPS` — **cocokkan fingerprint** dengan `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` di VPS |
+| `VPS_PORT` | opsional, bawaan 22 |
+
+Tanpa secret ini, workflow Deploy hanya memberi catatan "belum dikonfigurasi" dan tidak gagal. Opsional: Settings › Environments › `production` › *Required reviewers* untuk persetujuan manual sebelum deploy.
+
+### Backup
+- Otomatis harian (cron) + setiap sebelum deploy. Isi: `pg_dump` format custom (diverifikasi `pg_restore --list`) + arsip `/data` (logo, bukti top up, QRIS; pratinjau tidak ikut karena bisa dibuat ulang). Folder `backups/` hanya bisa dibaca pemiliknya.
+- Retensi `BACKUP_KEEP_DAYS` (bawaan 14 hari). Salinan ke luar VPS (disarankan): pasang `rclone`, isi `BACKUP_RCLONE_REMOTE=gdrive:galeri-backup` di `.env`.
+- Manual: `bash scripts/backup.sh manual`. Pulihkan: `bash scripts/restore.sh backups/galeri-db-....dump` (minta ketik `PULIHKAN`, membuat backup pengaman dulu, menghentikan app selama restore).
+
 ## Pengembangan
 
 ```bash
